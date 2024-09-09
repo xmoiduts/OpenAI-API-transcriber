@@ -1,0 +1,10 @@
+api_key_archive
+api_endpoint
+*.mp3
+*.m4a
+*.mp4
+*.srt
+*.download
+transcription_result/**
+tmp_audio_segments/**
+*.pyc
