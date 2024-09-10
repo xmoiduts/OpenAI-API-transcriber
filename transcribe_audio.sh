@@ -20,7 +20,7 @@ duration=''
 # 解析命令行参数
 while getopts "i:t:s:" opt; do
   case $opt in
-    i) input_file="$OPTARG"
+    i) input_file="$OPTARG" # media/xxxx.mp4
     ;;
     t) duration="$OPTARG"
     ;;
@@ -46,12 +46,17 @@ fi
 #  (openai supports: flac, mp3, mp4, mpeg, mpga, m4a, ogg, wav, or webm)
 #  and size < 25MB
 # else: extract stream, -s and -t is a must
-AUDIO_FILE_PATH="${TMP_DIR}/${input_file%.*}_cut.m4a" #m4a
-ffmpeg  -i "$input_file" -y -ss $start_time -t $duration -vn -acodec copy "$AUDIO_FILE_PATH"
+set -x
+FILE_NAME_CORE=${input_file%.*} # file name without extension name
+AUDIO_FILE_PATH="${TMP_DIR}/${FILE_NAME_CORE}_cut.m4a" #m4a
+ffmpeg  -i "medias/$input_file" -y -ss $start_time -t $duration -vn -acodec copy "$AUDIO_FILE_PATH"
 
 # 使用basename获取文件名（排除扩展名）
 filename=$(basename "${AUDIO_FILE_PATH%.*}")
-RESPONSE_FILE="transcription_result/${filename}_ss${start_time}-t${duration}.json"
+mkdir -p "transcription_result/${FILE_NAME_CORE}"
+RESPONSE_FILE="transcription_result/${FILE_NAME_CORE}/${filename}_ss${start_time}-t${duration}.json"
+
+set +x
 
 if [ ! -f "$AUDIO_FILE_PATH" ]; then
     echo "切割的音频文件未生成，请检查路径和参数"

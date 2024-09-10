@@ -45,13 +45,13 @@ def round_timestamp(timestamp: float) -> float:
     """Round timestamp to 0.01 second precision."""
     return round(timestamp, 2)
 
-def initialize_json_file_names_and_transcript_segments(title: str) -> Tuple[
+def initialize_json_file_names_and_transcript_segments(folder_name: str) -> Tuple[
     List[str], List[Tuple[float, float]]]:
     """
     Initialize JSON file names and transcript segment times for a given title prefix.
 
     Args:
-    title (str): Title prefix to filter JSON files.
+    folder_name (str): Title prefix to filter JSON files.
 
     Returns:
     Tuple[List[str], List[Tuple[float, float]]]: 
@@ -62,13 +62,13 @@ def initialize_json_file_names_and_transcript_segments(title: str) -> Tuple[
     Assumes 'extract_sort_key', 'load_json', and 'parse_filename' functions exist.
     JSON files are expected in '<project-root>/transcription_result/'.
     """
-    base_path = f"./transcription_result/{title}"
-    json_files = [f for f in os.listdir('./transcription_result') 
-                  if f.startswith(title) and f.endswith('.json')]
+    base_path = f"./transcription_result/{folder_name}"
+    json_files = [f for f in os.listdir(base_path) 
+                  if f.startswith(folder_name) and f.endswith('.json')]
     json_files.sort(key=extract_sort_key)
     transcript_segments = [] # [(0, 35.00), (30.00, 65.00), ...]
     for file in json_files:
-        data = load_json(os.path.join('./transcription_result', file))
+        data = load_json(os.path.join(base_path, file))
         segment_start_time, duration = parse_filename(file)
         transcript_segments.append((segment_start_time, segment_start_time+duration))
     return json_files, transcript_segments
@@ -164,16 +164,16 @@ def merge_words(
 
     return
 
-def merge_jsons(title: str, method: str = "midpoint") -> Dict:
+def merge_jsons(full_title: str, method: str = "midpoint") -> Dict:
     """Merge JSON files for the given title."""
-    json_files, transcript_segments = initialize_json_file_names_and_transcript_segments(title)
+    json_files, transcript_segments = initialize_json_file_names_and_transcript_segments(full_title)
     # overlaps:[(0,0), (30,35), (60,65), ..., (90,90)]
     overlaps = get_overlap_intervals(transcript_segments)
     merged_data = OrderedDict([("duration", 0), ("text", ""), ("words", [])])
 
     for idx_file, file in enumerate(json_files, start=0):
         # load data
-        data = load_json(os.path.join('./transcription_result', file))
+        data = load_json(os.path.join('./transcription_result', full_title, file))
         # process clip segment times
         segment_start_time, segment_end_time, duration = get_segment_times(
             transcript_segments, idx_file)
@@ -202,10 +202,27 @@ def save_json(data: Dict, file_path: str):
     with open(file_path, 'w', encoding='utf-8') as f:
         json.dump(data, f, ensure_ascii=False, indent=2, cls=OrderedEncoder)
 
-def main(title: str):
+def get_full_title_from_transcript_cuts(prefix: str) -> str:
+    """
+    Get the full folder name based on an arbitrary prefix.
+
+    Args:
+    prefix (str): Arbitrary prefix to match against folder names.
+
+    Returns:
+    str: Full folder name if found, empty string otherwise.
+    """
+    base_path = "./transcription_result"
+    for folder in os.listdir(base_path):
+        if os.path.isdir(os.path.join(base_path, folder)) and folder.startswith(prefix):
+            return folder
+    raise FileNotFoundError
+
+def main(title_prefix: str):
     """Main function to merge JSON files."""
-    merged_data = merge_jsons(title)
-    output_file = f"./transcription_result/merged_{title}.json"
+    full_title = get_full_title_from_transcript_cuts(title_prefix)
+    merged_data = merge_jsons(full_title)
+    output_file = f"./transcription_result/{full_title}/merged_{full_title}.json"
     save_json(merged_data, output_file)
     print(f"Merged JSON saved to:")
     print(f"{output_file}")
