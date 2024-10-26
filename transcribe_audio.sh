@@ -38,6 +38,11 @@ if [ -z "$input_file" ] || [ -z "$start_time" ] || [ -z "$duration" ]; then
     exit 1
 fi
 
+# 获取输入文件的完整路径和文件名
+input_file_fullpath="$(realpath "$input_file")"
+input_filename="$(basename "$input_file")"
+FILE_NAME_CORE="${input_filename%.*}" # file name without extension name
+
 # 使用ffmpeg切割音频文件，功能不成熟，暂且写死成copy vcodec.
 # outsource to a python or bash file: 
 # read source file format and audio size
@@ -47,12 +52,16 @@ fi
 #  and size < 25MB
 # else: extract stream, -s and -t is a must
 set -x
-FILE_NAME_CORE=${input_file%.*} # file name without extension name
 AUDIO_FILE_PATH="${TMP_DIR}/${FILE_NAME_CORE}_cut.m4a" #m4a
-ffmpeg  -i "medias/$input_file" -y -ss $start_time -t $duration -vn -acodec copy "$AUDIO_FILE_PATH"
+ffmpeg -i "${input_file_fullpath}" -y -ss $start_time -t $duration -vn "$AUDIO_FILE_PATH"
+if [ $? -ne 0 ]; then
+    echo "Failed to cut audio file. Exiting."
+    exit 1
+fi
+
 
 # 使用basename获取文件名（排除扩展名）
-filename=$(basename "${AUDIO_FILE_PATH%.*}")
+filename="$(basename "${AUDIO_FILE_PATH%.*}")"
 mkdir -p "transcription_result/${FILE_NAME_CORE}"
 RESPONSE_FILE="transcription_result/${FILE_NAME_CORE}/${filename}_ss${start_time}-t${duration}.json"
 
@@ -64,19 +73,21 @@ if [ ! -f "$AUDIO_FILE_PATH" ]; then
 fi
 
 # 发送请求并处理响应
+    #-F "timestamp_granularities[]=word" \
 set -x
 curl -X POST "$API_ENDPOINT" \
     -H "Authorization: Bearer $API_KEY" \
     -H "Content-Type: multipart/form-data" \
-    -F "file=@$AUDIO_FILE_PATH" \
-    -F "timestamp_granularities[]=word" \
+    -F "file=@${AUDIO_FILE_PATH}" \
     -F "model=whisper-1" \
     -F "response_format=verbose_json"  \
     -o "$RESPONSE_FILE"
+CURL_RET_CODE=$?
 set +x
 
+
 # 检查请求是否成功
-if [ $? -eq 0 ]; then
+if [ $CURL_RET_CODE -eq 0 ]; then
     echo "转录成功，响应信息已保存到$RESPONSE_FILE"
 else
     echo "请求失败，请检查脚本的输出来确定错误的原因。"

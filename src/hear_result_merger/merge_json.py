@@ -71,6 +71,9 @@ def initialize_json_file_names_and_transcript_segments(folder_name: str) -> Tupl
         data = load_json(os.path.join(base_path, file))
         segment_start_time, duration = parse_filename(file)
         transcript_segments.append((segment_start_time, segment_start_time+duration))
+    # Debug: Print return result
+    print("Debug: JSON files:", json_files)
+    print("Debug: Transcript segments:", transcript_segments)
     return json_files, transcript_segments
 
 def get_overlap_intervals(transcript_segments):
@@ -102,6 +105,7 @@ def calculate_midpoints(overlaps, idx):
     Every segment overlaps with previous and next one(s), so there are 2
     overlappings and there should be 2 midpoints, named left and right.
     """
+    print(f"Debug: overlaps={overlaps}, idx={idx}")
     left = (overlaps[idx][1] + overlaps[idx][0]) / 2
     right = (overlaps[idx+1][1] + overlaps[idx+1][0]) / 2
     print(f"{left}, {right}")

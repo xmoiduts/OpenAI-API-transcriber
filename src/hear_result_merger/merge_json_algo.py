@@ -17,16 +17,6 @@ def find_overlapping_intervals(intervals):
 
     return overlapping
 
-def pad_intervals(intervals, padding):
-    """
-    Extend each interval by a given amount in both directions.
-    
-    :param intervals: List of tuples representing time intervals (start, end)
-    :param extension: Amount to extend each interval by (in seconds)
-    :return: List of extended intervals
-    """
-    # usage: overlaps_padded = pad_intervals(overlaps, 10) # for llm
-    return [(max(0, start-padding), end+padding) for start, end in intervals]
 
     from typing import List, Tuple
 
