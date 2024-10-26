@@ -12,6 +12,7 @@ import os
 import sys
 import subprocess
 from PyQt5 import sip
+from .flying_message import show_flying_message
 
 def get_stylesheet():
     return """
@@ -158,54 +159,55 @@ class SegmentBar(QFrame):
         super().leaveEvent(event)
 """
 
-class FlyingLabel(QLabel):
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self.setAlignment(Qt.AlignCenter)
-        self.setStyleSheet("""
-            background-color: rgba(0, 0, 0, 0);
-            color: rgba(255, 255, 255, 0);
-            border-radius: 10px;
-            padding: 5px;
-        """)
-        self.setWordWrap(True)
-        self.timer = QTimer(self)
-        self.timer.timeout.connect(self.animate)
-        self.opacity = 0.0
-        self.y_position = 0
-        self.animation_state = "fly_in"
+# class FlyingLabel(QLabel):
+#     def __init__(self, parent=None):
+#         super().__init__(parent)
+#         self.setAlignment(Qt.AlignCenter)
+#         self.setStyleSheet("""
+#             background-color: rgba(0, 0, 0, 0);
+#             color: rgba(255, 255, 255, 0);
+#             border-radius: 10px;
+#             padding: 5px;
+#         """)
+#         self.setWordWrap(True)
+#         self.timer = QTimer(self)
+#         self.timer.timeout.connect(self.animate)
+#         self.opacity = 0.0
+#         self.y_position = 0
+#         self.animation_state = "fly_in"
 
-    def animate(self):
-        if self.animation_state == "fly_in":
-            self.opacity = min(1.0, self.opacity + 0.1)
-            self.y_position = max(self.target_y, self.y_position - 2)
-            self.move(self.x(), int(self.y_position))
-            self.update_style()
+#     def animate(self):
+#         if self.animation_state == "fly_in":
+#             self.opacity = min(1.0, self.opacity + 0.1)
+#             self.y_position = max(self.target_y, self.y_position - 2)
+#             self.move(self.x(), int(self.y_position))
+#             self.update_style()
             
-            if self.opacity >= 1.0 and self.y_position <= self.target_y:
-                self.animation_state = "stay"
-                self.timer.stop()
-                self.stay_timer.start()
+#             if self.opacity >= 1.0 and self.y_position <= self.target_y:
+#                 self.animation_state = "stay"
+#                 self.timer.stop()
+#                 self.stay_timer.start()
         
-        elif self.animation_state == "fade_out":
-            self.opacity = max(0.0, self.opacity - 0.1)
-            self.update_style()
+#         elif self.animation_state == "fade_out":
+#             self.opacity = max(0.0, self.opacity - 0.1)
+#             self.update_style()
             
-            if self.opacity <= 0:
-                self.hide()
-                self.timer.stop()
+#             if self.opacity <= 0:
+#                 self.hide()
+#                 self.timer.stop()
 
-    def update_style(self):
-        self.setStyleSheet(f"""
-            background-color: rgba(0, 0, 0, {int(180 * self.opacity)});
-            color: rgba(255, 255, 255, {int(255 * self.opacity)});
-            border-radius: 10px;
-            padding: 5px;
-        """)
+#     def update_style(self):
+#         self.setStyleSheet(f"""
+#             background-color: rgba(0, 0, 0, {int(180 * self.opacity)});
+#             color: rgba(255, 255, 255, {int(255 * self.opacity)});
+#             border-radius: 10px;
+#             padding: 5px;
+#         """)
 
-    def start_fade_out(self):
-        self.animation_state = "fade_out"
-        self.timer.start(16)
+#     def start_fade_out(self):
+#         self.animation_state = "fade_out"
+#         self.timer.start(16)
+# 
 
 class TimeSlicerTab(TabInterface):
     def __init__(self):
@@ -299,9 +301,9 @@ class TimeSlicerTab(TabInterface):
     def copy_full_path(self):
         if self.current_file_path:
             QApplication.clipboard().setText(self.current_file_path)
-            self.show_flying_message(f"Copied: {self.current_file_path}")
+            show_flying_message(self, f"Copied: {self.current_file_path}")
         else:
-            self.show_flying_message("No file selected")
+            show_flying_message(self, "No file selected")
 
     def copy_relative_path(self):
         if self.current_file_path:
@@ -309,45 +311,19 @@ class TimeSlicerTab(TabInterface):
                 relative_path = os.path.relpath(self.current_file_path)
                 unified_path = relative_path.replace(os.path.sep, '/')
                 QApplication.clipboard().setText(unified_path)
-                self.show_flying_message(f"Copied: {unified_path}")
+                show_flying_message(self, f"Copied: {unified_path}")
             except ValueError:
                 self.copy_full_path()
         else:
-            self.show_flying_message("No file selected")
+            show_flying_message(self, "No file selected")
 
     def copy_file_name(self):
         if self.current_file_path:
             file_name = os.path.basename(self.current_file_path)
             QApplication.clipboard().setText(file_name)
-            self.show_flying_message(f"Copied: {file_name}")
+            show_flying_message(self, f"Copied: {file_name}")
         else:
-            self.show_flying_message("No file selected")
-
-    def show_flying_message(self, message, duration=4000):
-        if self.current_flying_label and not sip.isdeleted(self.current_flying_label):
-            self.current_flying_label.deleteLater()
-        
-        self.current_flying_label = FlyingLabel(self)
-        self.current_flying_label.setText(message)
-        self.current_flying_label.adjustSize()
-        
-        width = self.current_flying_label.width()
-        height = self.current_flying_label.height()
-        
-        start_y = int(self.height() * 0.53)
-        self.current_flying_label.move(self.width() // 2 - width // 2, start_y)
-        self.current_flying_label.y_position = start_y
-
-        self.current_flying_label.target_y = int(self.height() * 0.5 - height // 2)
-        self.current_flying_label.raise_()
-
-        self.current_flying_label.show()
-        self.current_flying_label.timer.start(16)
-
-        self.current_flying_label.stay_timer = QTimer(self.current_flying_label)
-        self.current_flying_label.stay_timer.setSingleShot(True)
-        self.current_flying_label.stay_timer.timeout.connect(self.current_flying_label.start_fade_out)
-        self.current_flying_label.stay_timer.start(duration)
+            show_flying_message(self, "No file selected")
 
     def dragEnterEvent(self, event):
         if event.mimeData().hasUrls():
@@ -373,7 +349,9 @@ class TimeSlicerTab(TabInterface):
     def parse_file_duration_and_bitrate(self, file_path):
         try:
             self.file_duration, self.file_audio_bitrate = probe_media_file(file_path)
-            self.file_length_label.setText(f"File length: {self.file_duration:.2f} seconds, Audio bitrate: {self.file_audio_bitrate/1000:.2f} kbps")
+            self.file_length_label.setText(
+                f"File length: {self.file_duration:.2f} seconds, \
+                Audio bitrate: {self.file_audio_bitrate/1000:.2f} kbps")
         except Exception as e:
             self.file_length_label.setText(f"Error: {str(e)}")
 
@@ -386,7 +364,8 @@ class TimeSlicerTab(TabInterface):
         # Find the main window and update the transcription tab
         main_window = self.get_main_window()
         if main_window and hasattr(main_window, 'update_transcription_tab'):
-            main_window.update_transcription_tab(self.current_file_path, self.file_duration)
+            main_window.update_transcription_tab(
+                self.current_file_path, self.file_duration, self.segment_bar.segments)
         else:
             print("Warning: Could not update transcription tab")
 
@@ -400,7 +379,7 @@ class TimeSlicerTab(TabInterface):
 
     def update_segments(self):
         if self.file_duration:
-            slices = get_time_slices(self.file_duration, self.current_file_path)
+            slices = get_time_slices(self.file_duration, self.file_audio_bitrate)
             self.segment_bar.set_segments(slices)
         else:
             self.segment_bar.set_segments([])

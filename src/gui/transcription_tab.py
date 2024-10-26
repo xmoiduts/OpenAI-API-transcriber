@@ -30,6 +30,7 @@ class TranscriptionTab(TabInterface):
     def update_from_other_tab(self, data):
         file_path = data.get("file_path")
         duration = data.get("duration")
+        slices = data.get("slices")
         if file_path and duration:
             self.file_info_label.setText(f"File: {file_path}\nDuration: {duration:.2f} seconds")
             self.transcribe_button.setEnabled(True)  # Enable the button when a file is selected
@@ -37,7 +38,6 @@ class TranscriptionTab(TabInterface):
             self.file_info_label.setText("No file selected")
             self.transcribe_button.setEnabled(False)  # Disable the button when no file is selected
         if file_path and duration:
-            slices = get_time_slices(duration, file_path)
             self.segment_bar.set_segments(slices)
         else:
             self.segment_bar.set_segments([])

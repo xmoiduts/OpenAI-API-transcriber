@@ -1,6 +1,6 @@
-from .probe_media_file import probe_media_file
 import math
-def get_time_slices(total_duration, file_path):
+
+def get_time_slices(total_duration, audio_bitrate):
     """
     Given a total duration in seconds and a file path, return a list of time slices.
     Each slice is about 10 minutes long and the audio track should be about 10-15MB.
@@ -11,9 +11,6 @@ def get_time_slices(total_duration, file_path):
     """
     target_slice_duration = 600  # 10 minutes in seconds
     max_file_size = 15 * 1024 * 1024  # 15MB in bytes (60% of 25MB)
-
-    # Get audio bitrate
-    _, audio_bitrate = probe_media_file(file_path)
 
     # Calculate maximum duration for a 15MB slice
     max_duration = (max_file_size * 8) / audio_bitrate

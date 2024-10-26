@@ -22,5 +22,9 @@ class MainWindow(QMainWindow):
 
         self.setStyleSheet(get_stylesheet())
 
-    def update_transcription_tab(self, file_path, duration):
-        self.transcription_tab.update_from_other_tab({"file_path": file_path, "duration": duration})
+    def update_transcription_tab(self, file_path, duration, slices):
+        self.transcription_tab.update_from_other_tab(
+            {"file_path": file_path, "duration": duration, "slices": slices})
+        self.transcription_new_tab.update_from_other_tab(
+            {"file_path": file_path, "duration": duration, "slices": slices})
+
