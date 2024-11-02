@@ -44,9 +44,15 @@ def get_stylesheet():
             padding: 20px;
             background-color: #ffffff;
             border-radius: 8px;
-            font-size: 18px;  /* Increased font size for drop label */
-            font-weight: bold;  /* Optional: make the text bold */
-            color: #888888;  /* Lighter font color */
+            font-size: 18px;
+            font-weight: bold;
+            color: #888888;
+            /*unfortunately, no transition for QSS*/
+        }
+        QLabel#drop_label[dragOver="true"] {
+            border: 2px dashed #4CAF50;
+            background-color: #E8F5E9;
+            color: #4CAF50;
         }
         QPushButton#open_file_button {
             background-color: #4CAF50;
@@ -225,7 +231,7 @@ class TimeSlicerTab(TabInterface):
     def init_ui(self):
         layout = QVBoxLayout()
         
-        self.drop_label = QLabel("Drag and drop a media file here")
+        self.drop_label = QLabel("Drag a media file here to load")
         self.drop_label.setObjectName("drop_label")
         self.drop_label.setAlignment(Qt.AlignCenter)
         layout.addWidget(self.drop_label)
@@ -326,25 +332,46 @@ class TimeSlicerTab(TabInterface):
         else:
             show_flying_message(self, "No file selected")
 
+    # drag and drop #
     def dragEnterEvent(self, event):
         if event.mimeData().hasUrls():
+            self.drop_label.setProperty("dragOver", True)
+            self.drop_label.style().unpolish(self.drop_label)
+            self.drop_label.style().polish(self.drop_label)
+            self.drop_label.setText("Drop to load file")
             event.accept()
         else:
             event.ignore()
 
+    def dragLeaveEvent(self, event):
+        self.drop_label.setProperty("dragOver", False)
+        self.drop_label.style().unpolish(self.drop_label)
+        self.drop_label.style().polish(self.drop_label)
+        self.drop_label.setText("Drag a media file here to load")
+        super().dragLeaveEvent(event)
+
     def dropEvent(self, event):
+        self.drop_label.setProperty("dragOver", False)
+        self.drop_label.style().unpolish(self.drop_label)
+        self.drop_label.style().polish(self.drop_label)
         files = [u.toLocalFile() for u in event.mimeData().urls()]
         if files:
             self.current_file_path = files[0]
+            self.drop_label.setText("File opened successfully from drag and drop!")
             self.update_file_info()
+    # end frag and drop #
 
+    # click to open file #
     def open_file_dialog(self):
-        file_path, _ = QFileDialog.getOpenFileName(self, "Open Media File", "medias", "Media Files (*.mp3 *.mp4 *.avi *.mov *.wav *.m4a)")
+        file_path, _ = QFileDialog.getOpenFileName(
+            self, "Open Media File", "medias",
+            "Media Files (*.mp3 *.mp4 *.avi *.mov *.wav *.m4a)")
         if file_path:
             self.current_file_path = file_path
             self.drop_label.setText("File opened successfully from explorer!")
             self.parse_file_duration_and_bitrate(file_path)
             self.update_file_info()
+    # end click to open file #
 
     def parse_file_duration_and_bitrate(self, file_path):
         try:
