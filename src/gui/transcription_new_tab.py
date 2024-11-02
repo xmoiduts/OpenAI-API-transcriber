@@ -1,5 +1,5 @@
-from PyQt5.QtWidgets import (QWidget, QVBoxLayout, QLabel, QPushButton, 
-                           QFileDialog, QTextEdit, QProgressBar)
+from PyQt5.QtWidgets import (QWidget, QHBoxLayout, QVBoxLayout, QLabel, 
+                            QPushButton, QFileDialog, QTextEdit, QProgressBar)
 from PyQt5.QtCore import QTimer, QThread, pyqtSignal
 from .tab_interface import TabInterface
 from .segment_bar import SegmentBar
@@ -18,18 +18,42 @@ class TranscriptionNewTab(TabInterface):
         self.log_queue = []
 
     def init_ui(self):
+        # Main vertical layout
         layout = QVBoxLayout()
+        
+        # Top section for file info and segment bar
+        top_section = QVBoxLayout()
         self.file_info_label = QLabel("No file selected")
         self.file_info_label.setWordWrap(True)
         top_section.addWidget(self.file_info_label)
         self.segment_bar = SegmentBar(mode="transcription")
-        layout.addWidget(self.segment_bar)
-
-        # Transcription button
-        self.transcribe_button = QPushButton("Start Transcribe")
+        top_section.addWidget(self.segment_bar)
+        
+        # Progress section
+        progress_section = QVBoxLayout()
+        self.progress_bar = QProgressBar()
+        self.progress_bar.hide()  # Initially hidden
+        progress_section.addWidget(self.progress_bar)
+        
+        # Middle section for log
+        middle_section = QVBoxLayout()
+        self.log_display = QTextEdit()
+        self.log_display.setReadOnly(True)
+        middle_section.addWidget(self.log_display)
+        
+        # Bottom section for buttons
+        bottom_section = QHBoxLayout()
+        self.transcribe_button = QPushButton("Transcribe")
         self.transcribe_button.clicked.connect(self.start_transcription)
         self.transcribe_button.setEnabled(False) # Disable initially
-        layout.addWidget(self.transcribe_button)
+        bottom_section.addStretch()
+        bottom_section.addWidget(self.transcribe_button)
+        
+        # Add all sections to main layout
+        layout.addLayout(top_section)
+        layout.addLayout(progress_section)
+        layout.addLayout(middle_section, stretch=1)  # Give log window stretch priority
+        layout.addLayout(bottom_section)
 
         self.setLayout(layout)
 
@@ -48,38 +72,37 @@ class TranscriptionNewTab(TabInterface):
         else:
             self.file_info_label.setText("No file selected")
             # Disable the button when no file is selected
-            self.transcribe_button.setEnabled(False)
+            self.transcribe_button.setEnabled(False)  
         if self.file_path and self.duration:
             self.segment_bar.set_segments(self.slices)
         else:
             self.segment_bar.set_segments([])
 
     def start_transcription(self):
-        if not self.file_path:
-            show_flying_message(self, "No file selected")
-            return
-        if not self.duration:
-            show_flying_message(self, "No duration information")
+        if not self.file_path or not self.duration or not self.slices:
+            show_flying_message(self, "Missing required information")
             return
 
         try:
             self.transcribe_button.setEnabled(False)
-
-            # Clear previous log display if it exists
-            if hasattr(self, 'log_display'):
-                self.layout().removeWidget(self.log_display)
-                self.log_display.deleteLater()
-                self.log_display = None
-
-            # New log display
-            self.log_display = QTextEdit()
-            self.log_display.setReadOnly(True)
-            self.layout().addWidget(self.log_display)
+            self.progress_bar.setValue(0)
+            self.progress_bar.show()
+            self.log_display.clear()
+            
+            # Initialize segment statuses
+            self.segment_bar.set_segment_status({i: "pending" for i in range(len(self.slices))})
 
             # Create and start the transcription thread
-            self.transcription_thread = TranscriptionThread(self.transcriber, self.file_path, self.duration)
+            self.transcription_thread = TranscriptionThread(
+                self.transcriber, 
+                self.file_path, 
+                self.duration,
+                self.slices
+            )
             self.transcription_thread.log_signal.connect(self.update_log)
             self.transcription_thread.finished_signal.connect(self.transcription_finished)
+            self.transcription_thread.progress_signal.connect(self.progress_bar.setValue)
+            self.transcription_thread.segment_status_signal.connect(self.update_segment_status)
             self.transcription_thread.start()
 
         except Exception as e:
@@ -87,6 +110,12 @@ class TranscriptionNewTab(TabInterface):
             error_message = f"Error during transcription: {str(e)}\n\nCall Stack:\n{traceback.format_exc()}"
             self.log_display.append(error_message)
             self.transcribe_button.setEnabled(True)
+
+    def update_segment_status(self, segment_index, status):
+        """Update the status of a specific segment in the segment bar"""
+        current_statuses = self.segment_bar.segment_status.copy()
+        current_statuses[segment_index] = status
+        self.segment_bar.set_segment_status(current_statuses)
 
     def log_callback(self, message):
         self.log_queue.append(message)
@@ -103,22 +132,50 @@ class TranscriptionNewTab(TabInterface):
         else:
             self.log_display.append("Transcription failed")
         self.transcribe_button.setEnabled(True)
+        self.progress_bar.hide()
 
 class TranscriptionThread(QThread):
     log_signal = pyqtSignal(str)
     finished_signal = pyqtSignal(bool)
+    progress_signal = pyqtSignal(int)
+    segment_status_signal = pyqtSignal(int, str)  # New signal for segment status updates
 
-    def __init__(self, transcriber, file_path, duration):
+    def __init__(self, transcriber, file_path, duration, slices):
         super().__init__()
         self.transcriber = transcriber
         self.file_path = file_path
         self.duration = duration
+        self.slices = slices
 
     def run(self):
-        result = self.transcriber.transcribe(
-            input_file=self.file_path,
-            start_time=0,
-            duration=int(self.duration),
-            log_callback=self.log_signal.emit
-        )
-        self.finished_signal.emit(result is not None)
+        try:
+            total_slices = len(self.slices)
+            for i, (start_time, duration) in enumerate(self.slices):
+                self.segment_status_signal.emit(i, "in_progress")
+                self.log_signal.emit(f"\nProcessing segment {i+1}/{total_slices}")
+                self.log_signal.emit(f"Start time: {start_time}s, Duration: {duration}s")
+                
+                result = self.transcriber.transcribe(
+                    input_file=self.file_path,
+                    start_time=start_time,
+                    duration=int(duration),
+                    log_callback=self.log_signal.emit
+                )
+                
+                if result is None:
+                    self.segment_status_signal.emit(i, "error")
+                    self.log_signal.emit(f"Failed to transcribe segment {i+1}")
+                    self.finished_signal.emit(False)
+                    return
+                
+                self.segment_status_signal.emit(i, "completed")
+                progress = int(((i + 1) / total_slices) * 100)
+                self.progress_signal.emit(progress)
+                import time # delay 30 seconds before launching next transcribe request, for API throttling.
+                time.sleep(30)
+            
+            self.finished_signal.emit(True)
+        except Exception as e:
+            self.segment_status_signal.emit(i, "error")
+            self.log_signal.emit(f"Error during transcription: {str(e)}")
+            self.finished_signal.emit(False)
