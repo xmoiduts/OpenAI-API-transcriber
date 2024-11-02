@@ -41,7 +41,8 @@ class WhisperTranscriber:
             # Prepare file paths
             input_path = Path(input_file).resolve()
             file_stem = input_path.stem
-            audio_segment = self.tmp_dir / f"{file_stem}_cut.m4a" #BUG: mp3 to m4a will cause GBK error
+            output_format = self._get_output_format(input_path)
+            audio_segment = self.tmp_dir / f"{file_stem}_cut.{output_format}"
             
             # Cut audio segment using ffmpeg
             self._log(log_callback, "Cutting audio segment...")
@@ -77,20 +78,47 @@ class WhisperTranscriber:
             self._log(log_callback, f"Transcription failed: {e}")
             return None
 
+    def _get_output_format(self, input_file: Path) -> str:
+        """Determine appropriate output format based on input file."""
+        input_ext = input_file.suffix.lower()
+        
+        # For common lossy formats, maintain original format
+        if input_ext in ['.mp3']:
+            return input_ext[1:]  # Remove dot
+        
+        # For container formats (mp4, flv, etc), extract to m4a
+        return 'm4a'
+
     def _cut_audio_segment(self, 
                         input_file: Path, 
                         output_file: Path, 
                         start_time: int, 
                         duration: int,
                         log_callback: Optional[Callable[[str], None]] = None) -> bool:
-        """Cut audio segment using ffmpeg."""
+        """Cut audio segment using ffmpeg with format-specific optimizations."""
         import ffmpeg
         import subprocess
         try:
+            # Base stream with timing
+            stream = ffmpeg.input(str(input_file), ss=start_time, t=duration)
+            
+            # Get input format
+            input_ext = input_file.suffix.lower()
+            output_ext = output_file.suffix.lower()
+            
+            # Configure output options based on format
+            output_options = {
+                'vn': None,  # No video
+            }
+            
+            # For lossy sources, use copy codec when format matches
+            if input_ext == output_ext and input_ext in ['.mp3', '.m4a']:
+                output_options['acodec'] = 'copy'
+            
+            # Build ffmpeg command
             cmd = (
-                ffmpeg
-                .input(str(input_file), ss=start_time, t=duration)
-                .output(str(output_file), vn=None)
+                stream
+                .output(str(output_file), **output_options)
                 .compile()
             )
             
