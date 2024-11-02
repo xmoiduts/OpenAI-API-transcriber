@@ -122,10 +122,14 @@ class WhisperTranscriber:
                 .compile()
             )
             
+            # Print the command that will be executed
+            self._log(log_callback, f"Executing FFmpeg command: {' '.join(cmd)}")
+            
             process = subprocess.Popen(
                 cmd, 
                 stdout=subprocess.PIPE, 
                 stderr=subprocess.PIPE, 
+                encoding='utf-8', 
                 universal_newlines=True
             )
             
