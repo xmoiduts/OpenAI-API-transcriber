@@ -1,5 +1,6 @@
 import math
 
+PADDING = 9
 def get_time_slices(total_duration, audio_bitrate):
     """
     Given a total duration in seconds and a file path, return a list of time slices.
@@ -13,13 +14,13 @@ def get_time_slices(total_duration, audio_bitrate):
     max_file_size = 15 * 1024 * 1024  # 15MB in bytes (60% of 25MB)
 
     # Calculate maximum duration for a 15MB slice
-    max_duration = (max_file_size * 8) / audio_bitrate
+    max_duration = math.floor((max_file_size * 8) / audio_bitrate)
 
     slices = []
     current_time = 0
 
     while current_time < total_duration:
-        slice_duration = min(target_slice_duration, max_duration, total_duration - current_time)
+        slice_duration = min(target_slice_duration, max_duration, math.ceil(total_duration - current_time))
         
         # Round start time to nearest 30 seconds for human-friendliness
         rounded_start = round(current_time / 30) * 30
@@ -43,7 +44,7 @@ def get_time_slices(total_duration, audio_bitrate):
             slices[-2] = (second_last_slice[0], new_duration)
             slices[-1] = (second_last_slice[0] + new_duration, math.ceil(total_time - new_duration))
 
-    return pad_intervals_right(slices, 9)
+    return pad_intervals_right(slices, PADDING)
 
 def pad_intervals_right(intervals, padding):
     """
