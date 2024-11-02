@@ -6,6 +6,7 @@ from src.time_slicer.time_slicer import get_time_slices
 import subprocess
 import os
 import sys
+from .util.add_zero_wide_char_to_str import add_zero_wide_char_to_str
 
 class TranscriptionTab(TabInterface):
     def __init__(self):
@@ -15,6 +16,7 @@ class TranscriptionTab(TabInterface):
     def init_ui(self):
         layout = QVBoxLayout()
         self.file_info_label = QLabel("No file selected")
+        self.file_info_label.setWordWrap(True)
         layout.addWidget(self.file_info_label)
 
         self.segment_bar = SegmentBar(mode="transcription")
@@ -32,7 +34,9 @@ class TranscriptionTab(TabInterface):
         duration = data.get("duration")
         slices = data.get("slices")
         if file_path and duration:
-            self.file_info_label.setText(f"File: {file_path}\nDuration: {duration:.2f} seconds")
+            display_path = add_zero_wide_char_to_str(file_path)
+            self.file_info_label.setText(
+                f"File: {display_path} | Duration: {duration:.2f}s")
             self.transcribe_button.setEnabled(True)  # Enable the button when a file is selected
         else:
             self.file_info_label.setText("No file selected")

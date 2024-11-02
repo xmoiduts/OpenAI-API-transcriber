@@ -6,6 +6,7 @@ from .segment_bar import SegmentBar
 from src.time_slicer.time_slicer import get_time_slices
 from src.transcriber_core.transcriber import WhisperTranscriber
 from .flying_message import show_flying_message
+from .util.add_zero_wide_char_to_str import add_zero_wide_char_to_str
 class TranscriptionNewTab(TabInterface):
     def __init__(self):
         super().__init__("Transcription New")
@@ -19,8 +20,8 @@ class TranscriptionNewTab(TabInterface):
     def init_ui(self):
         layout = QVBoxLayout()
         self.file_info_label = QLabel("No file selected")
-        layout.addWidget(self.file_info_label)
-
+        self.file_info_label.setWordWrap(True)
+        top_section.addWidget(self.file_info_label)
         self.segment_bar = SegmentBar(mode="transcription")
         layout.addWidget(self.segment_bar)
 
@@ -37,10 +38,12 @@ class TranscriptionNewTab(TabInterface):
         self.duration = data.get("duration")
         self.slices = data.get("slices")
         if self.file_path and self.duration:
+            # Format file path to show only the last part if too long
+            file_name = self.file_path.split('/')[-1]  # Get just the filename
+            # Insert zero-width spaces at path separators for better wrapping
+            display_path = add_zero_wide_char_to_str(self.file_path)
             self.file_info_label.setText(
-                f"File: {self.file_path}\n"
-                f"Duration: {self.duration:.2f} seconds")
-            # Enable the button when a file is selected
+                f"File: {display_path} | Duration: {self.duration:.2f}s")
             self.transcribe_button.setEnabled(True)
         else:
             self.file_info_label.setText("No file selected")

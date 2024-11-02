@@ -13,6 +13,7 @@ import sys
 import subprocess
 from PyQt5 import sip
 from .flying_message import show_flying_message
+from .util.add_zero_wide_char_to_str import add_zero_wide_char_to_str
 
 def get_stylesheet():
     return """
@@ -341,7 +342,6 @@ class TimeSlicerTab(TabInterface):
         file_path, _ = QFileDialog.getOpenFileName(self, "Open Media File", "medias", "Media Files (*.mp3 *.mp4 *.avi *.mov *.wav *.m4a)")
         if file_path:
             self.current_file_path = file_path
-            self.file_path_label.setText(f"File path: {file_path}")
             self.drop_label.setText("File opened successfully from explorer!")
             self.parse_file_duration_and_bitrate(file_path)
             self.update_file_info()
@@ -356,8 +356,8 @@ class TimeSlicerTab(TabInterface):
             self.file_length_label.setText(f"Error: {str(e)}")
 
     def update_file_info(self):
-        self.file_path_label.setText(f"File path: {self.current_file_path}")
-        self.drop_label.setText("File processed successfully!")
+        display_path = add_zero_wide_char_to_str(self.current_file_path)
+        self.file_path_label.setText(f"File path: {display_path}")
         self.parse_file_duration_and_bitrate(self.current_file_path)
         self.update_segments()
         
