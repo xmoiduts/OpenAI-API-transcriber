@@ -79,7 +79,10 @@ class TranscriptionNewTab(TabInterface):
             self.segment_bar.set_segments([])
 
     def start_transcription(self):
-        if not self.file_path or not self.duration or not self.slices:
+        slices = self.segment_bar.segments
+        segment_offsets = self.segment_bar.segment_start_offsets
+        assert len(slices) == len(segment_offsets)
+        if not self.file_path or not self.duration or not slices:
             show_flying_message(self, "Missing required information")
             return
 
@@ -90,14 +93,14 @@ class TranscriptionNewTab(TabInterface):
             self.log_display.clear()
             
             # Initialize segment statuses
-            self.segment_bar.set_segment_status({i: "pending" for i in range(len(self.slices))})
+            self.segment_bar.set_segment_status({i: "pending" for i in range(len(slices))})
 
             # Create and start the transcription thread
             self.transcription_thread = TranscriptionThread(
                 self.transcriber, 
                 self.file_path, 
-                self.duration,
-                self.slices
+                slices,
+                segment_offsets
             )
             self.transcription_thread.log_signal.connect(self.update_log)
             self.transcription_thread.finished_signal.connect(self.transcription_finished)
@@ -140,24 +143,29 @@ class TranscriptionThread(QThread):
     progress_signal = pyqtSignal(int)
     segment_status_signal = pyqtSignal(int, str)  # New signal for segment status updates
 
-    def __init__(self, transcriber, file_path, duration, slices):
+    def __init__(self, transcriber, file_path, slices, actual_starts):
         super().__init__()
         self.transcriber = transcriber
         self.file_path = file_path
-        self.duration = duration
-        self.slices = slices
+        self.slices = slices # list of (start: int?, duration: int?)
+        self.actual_starts = actual_starts # list of int, len == slices
+        assert len(self.slices) == len(self.actual_starts)
 
     def run(self):
         try:
             total_slices = len(self.slices)
-            for i, (start_time, duration) in enumerate(self.slices):
+            for i, (slice_start, duration) in enumerate(self.slices):
                 self.segment_status_signal.emit(i, "in_progress")
                 self.log_signal.emit(f"\nProcessing segment {i+1}/{total_slices}")
-                self.log_signal.emit(f"Start time: {start_time}s, Duration: {duration}s")
+                actual_start = self.actual_starts[i]
+                self.log_signal.emit(f"Slice start: {slice_start}s,\
+                                      Actual start: {actual_start}s,\
+                                          Duration: {duration}s")
                 
                 result = self.transcriber.transcribe(
                     input_file=self.file_path,
-                    start_time=start_time,
+                    display_start=slice_start,
+                    actual_start=actual_start,
                     duration=int(duration),
                     log_callback=self.log_signal.emit
                 )

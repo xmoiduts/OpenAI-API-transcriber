@@ -17,7 +17,8 @@ class WhisperTranscriber:
 
     def transcribe(self, 
                    input_file: str | Path, 
-                   start_time: int, 
+                   display_start: int,
+                   actual_start: int, 
                    duration: int,
                    cleanup_tmp: bool = True,
                    log_callback: Optional[Callable[[str], None]] = None) -> Optional[dict]:
@@ -26,7 +27,8 @@ class WhisperTranscriber:
         
         Args:
             input_file: Path to input media file
-            start_time: Start time in seconds
+            display_start: Display timestamp in seconds (for output filename)
+            actual_start: Actual start time in seconds for cutting the audio
             duration: Duration to transcribe in seconds
             cleanup_tmp: Whether to remove temporary files after transcription
             log_callback: Optional callback function for logging
@@ -47,19 +49,25 @@ class WhisperTranscriber:
             # Cut audio segment using ffmpeg
             self._log(log_callback, "Cutting audio segment...")
             if not self._cut_audio_segment(
-                input_path, audio_segment, start_time, duration, log_callback):
+                input_path, audio_segment, actual_start, duration, log_callback):
                 return None
 
             # Prepare output directory and file
             result_dir = self.result_dir / file_stem
             result_dir.mkdir(exist_ok=True)
             result_file = result_dir / \
-                f"{audio_segment.stem}_ss{start_time}-t{duration}.json"
+                f"{audio_segment.stem}_ss{display_start}-t{duration}.json"
             self._log(log_callback, f"...{result_file}")
 
             # Call Whisper API
             self._log(log_callback, "Calling Whisper API...")
-            result = self._call_whisper_api(audio_segment, result_file, log_callback)
+            result = self._call_whisper_api(
+                audio_segment, 
+                result_file, 
+                actual_start,
+                display_start,
+                log_callback
+            )
 
             # Cleanup if requested
             if cleanup_tmp and audio_segment.exists():
@@ -146,7 +154,13 @@ class WhisperTranscriber:
             self._log(log_callback, f"FFmpeg error: {e.stderr}")
             return False
 
-    def _call_whisper_api(self, audio_file: Path, result_file: Path, log_callback: Optional[Callable[[str], None]] = None) -> Optional[dict]:
+    def _call_whisper_api(self,
+                          audio_file: Path,
+                          result_file: Path,
+                          actual_start: int,
+                          display_start: int,
+                          log_callback: 
+                            Optional[Callable[[str], None]] = None) -> Optional[dict]:
         """Call OpenAI Whisper API and save result."""
         try:
             self._log(log_callback, "Preparing API call...")
@@ -169,7 +183,9 @@ class WhisperTranscriber:
                 response.raise_for_status()
                 
                 result = response.json()
-                
+                # Adjust timestamps in result
+                time_offset = actual_start - display_start
+                result = self._adjust_timestamps(result, time_offset)
                 # Save result to file
                 self._log(log_callback, "Saving transcription result...")
                 with open(result_file, 'w', encoding='utf-8') as f:
@@ -180,6 +196,40 @@ class WhisperTranscriber:
         except Exception as e:
             self._log(log_callback, f"API call failed: {e}")
             return None
+
+    def _adjust_timestamps(self, result: dict, time_offset: int) -> dict:
+        """
+        Adjust timestamps in transcription result by adding an offset.
+        
+        Args:
+            result: Original transcription result from Whisper API
+            time_offset: Time offset in seconds to add to timestamps
+            
+        Returns:
+            dict: Adjusted transcription result
+        """
+        if not result or time_offset == 0:
+            return result
+            
+        # Create a deep copy to avoid modifying the original
+        adjusted = result.copy()
+
+        # preserve whisper-transcribed duration
+        adjusted["real_duration"] = result["duration"]
+        
+        # Adjust duration if present
+        if 'duration' in adjusted:
+            adjusted['duration'] += time_offset
+        
+        # Adjust word-level timestamps
+        if 'words' in adjusted:
+            for word in adjusted['words']:
+                if 'start' in word:
+                    word['start'] += time_offset
+                if 'end' in word:
+                    word['end'] += time_offset
+                    
+        return adjusted
         
     def _log(self, log_callback: Optional[Callable[[str], None]], message: str):
         """Log a message using the provided callback if available."""
