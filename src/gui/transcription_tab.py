@@ -32,6 +32,7 @@ class TranscriptionTab(TabInterface):
     def update_from_other_tab(self, data):
         file_path = data.get("file_path")
         duration = data.get("duration")
+        self.file_path, self.duration = file_path, duration
         slices = data.get("slices")
         if file_path and duration:
             display_path = add_zero_wide_char_to_str(file_path)
@@ -47,8 +48,8 @@ class TranscriptionTab(TabInterface):
             self.segment_bar.set_segments([])
 
     def start_transcription(self):
-        file_path = self.file_info_label.text().split("\n")[0].split(": ")[1]
-        duration = float(self.file_info_label.text().split("\n")[1].split(": ")[1].split(" ")[0])
+        file_path = self.file_path
+        duration = float(self.duration)
         
 
         # 获取项目根目录

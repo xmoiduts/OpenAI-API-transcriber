@@ -1,6 +1,7 @@
 import math
 
 PADDING = 9
+SLICE_DURATION_MINUTES=10
 def get_time_slices(total_duration, audio_bitrate):
     """
     Given a total duration in seconds and a file path, return a list of time slices.
@@ -10,7 +11,8 @@ def get_time_slices(total_duration, audio_bitrate):
     :param file_path: Path to the media file
     :return: List of tuples (start_time, duration)
     """
-    target_slice_duration = 600  # 10 minutes in seconds
+    minutes = 60 # 1min = 60s
+    target_slice_duration = SLICE_DURATION_MINUTES * minutes  # default should be: 10 minutes in seconds
     max_file_size = 15 * 1024 * 1024  # 15MB in bytes (60% of 25MB)
 
     # Calculate maximum duration for a 15MB slice

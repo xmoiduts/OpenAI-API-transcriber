@@ -155,8 +155,9 @@ class WhisperTranscriber:
                 headers = {'Authorization': f'Bearer {self.api_key}'}
                 data = {
                     'model': 'whisper-1',
-                    'response_format': 'verbose_json' 
-                } # bug: verbose json not effective, actually responded with json.
+                    'response_format': 'verbose_json',
+                    'timestamp_granularities[]': 'word'
+                }
                 
                 self._log(log_callback, "Sending request to Whisper API...")
                 response = requests.post(
