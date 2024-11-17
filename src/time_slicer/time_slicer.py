@@ -1,6 +1,8 @@
-from .probe_media_file import probe_media_file
 import math
-def get_time_slices(total_duration, file_path):
+
+PADDING = 9
+SLICE_DURATION_MINUTES=10
+def get_time_slices(total_duration, audio_bitrate):
     """
     Given a total duration in seconds and a file path, return a list of time slices.
     Each slice is about 10 minutes long and the audio track should be about 10-15MB.
@@ -9,20 +11,18 @@ def get_time_slices(total_duration, file_path):
     :param file_path: Path to the media file
     :return: List of tuples (start_time, duration)
     """
-    target_slice_duration = 600  # 10 minutes in seconds
+    minutes = 60 # 1min = 60s
+    target_slice_duration = SLICE_DURATION_MINUTES * minutes  # default should be: 10 minutes in seconds
     max_file_size = 15 * 1024 * 1024  # 15MB in bytes (60% of 25MB)
 
-    # Get audio bitrate
-    _, audio_bitrate = probe_media_file(file_path)
-
     # Calculate maximum duration for a 15MB slice
-    max_duration = (max_file_size * 8) / audio_bitrate
+    max_duration = math.floor((max_file_size * 8) / audio_bitrate)
 
     slices = []
     current_time = 0
 
     while current_time < total_duration:
-        slice_duration = min(target_slice_duration, max_duration, total_duration - current_time)
+        slice_duration = min(target_slice_duration, max_duration, math.ceil(total_duration - current_time))
         
         # Round start time to nearest 30 seconds for human-friendliness
         rounded_start = round(current_time / 30) * 30
@@ -46,7 +46,7 @@ def get_time_slices(total_duration, file_path):
             slices[-2] = (second_last_slice[0], new_duration)
             slices[-1] = (second_last_slice[0] + new_duration, math.ceil(total_time - new_duration))
 
-    return pad_intervals_right(slices, 9)
+    return pad_intervals_right(slices, PADDING)
 
 def pad_intervals_right(intervals, padding):
     """

@@ -12,6 +12,8 @@ import os
 import sys
 import subprocess
 from PyQt5 import sip
+from .flying_message import show_flying_message
+from .util.add_zero_wide_char_to_str import add_zero_wide_char_to_str
 
 def get_stylesheet():
     return """
@@ -42,9 +44,15 @@ def get_stylesheet():
             padding: 20px;
             background-color: #ffffff;
             border-radius: 8px;
-            font-size: 18px;  /* Increased font size for drop label */
-            font-weight: bold;  /* Optional: make the text bold */
-            color: #888888;  /* Lighter font color */
+            font-size: 18px;
+            font-weight: bold;
+            color: #888888;
+            /*unfortunately, no transition for QSS*/
+        }
+        QLabel#drop_label[dragOver="true"] {
+            border: 2px dashed #4CAF50;
+            background-color: #E8F5E9;
+            color: #4CAF50;
         }
         QPushButton#open_file_button {
             background-color: #4CAF50;
@@ -158,55 +166,6 @@ class SegmentBar(QFrame):
         super().leaveEvent(event)
 """
 
-class FlyingLabel(QLabel):
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self.setAlignment(Qt.AlignCenter)
-        self.setStyleSheet("""
-            background-color: rgba(0, 0, 0, 0);
-            color: rgba(255, 255, 255, 0);
-            border-radius: 10px;
-            padding: 5px;
-        """)
-        self.setWordWrap(True)
-        self.timer = QTimer(self)
-        self.timer.timeout.connect(self.animate)
-        self.opacity = 0.0
-        self.y_position = 0
-        self.animation_state = "fly_in"
-
-    def animate(self):
-        if self.animation_state == "fly_in":
-            self.opacity = min(1.0, self.opacity + 0.1)
-            self.y_position = max(self.target_y, self.y_position - 2)
-            self.move(self.x(), int(self.y_position))
-            self.update_style()
-            
-            if self.opacity >= 1.0 and self.y_position <= self.target_y:
-                self.animation_state = "stay"
-                self.timer.stop()
-                self.stay_timer.start()
-        
-        elif self.animation_state == "fade_out":
-            self.opacity = max(0.0, self.opacity - 0.1)
-            self.update_style()
-            
-            if self.opacity <= 0:
-                self.hide()
-                self.timer.stop()
-
-    def update_style(self):
-        self.setStyleSheet(f"""
-            background-color: rgba(0, 0, 0, {int(180 * self.opacity)});
-            color: rgba(255, 255, 255, {int(255 * self.opacity)});
-            border-radius: 10px;
-            padding: 5px;
-        """)
-
-    def start_fade_out(self):
-        self.animation_state = "fade_out"
-        self.timer.start(16)
-
 class TimeSlicerTab(TabInterface):
     def __init__(self):
         super().__init__("Time Slicer")
@@ -222,7 +181,7 @@ class TimeSlicerTab(TabInterface):
     def init_ui(self):
         layout = QVBoxLayout()
         
-        self.drop_label = QLabel("Drag and drop a media file here")
+        self.drop_label = QLabel("Drag a media file here to load")
         self.drop_label.setObjectName("drop_label")
         self.drop_label.setAlignment(Qt.AlignCenter)
         layout.addWidget(self.drop_label)
@@ -299,9 +258,9 @@ class TimeSlicerTab(TabInterface):
     def copy_full_path(self):
         if self.current_file_path:
             QApplication.clipboard().setText(self.current_file_path)
-            self.show_flying_message(f"Copied: {self.current_file_path}")
+            show_flying_message(self, f"Copied: {self.current_file_path}")
         else:
-            self.show_flying_message("No file selected")
+            show_flying_message(self, "No file selected")
 
     def copy_relative_path(self):
         if self.current_file_path:
@@ -309,84 +268,81 @@ class TimeSlicerTab(TabInterface):
                 relative_path = os.path.relpath(self.current_file_path)
                 unified_path = relative_path.replace(os.path.sep, '/')
                 QApplication.clipboard().setText(unified_path)
-                self.show_flying_message(f"Copied: {unified_path}")
+                show_flying_message(self, f"Copied: {unified_path}")
             except ValueError:
                 self.copy_full_path()
         else:
-            self.show_flying_message("No file selected")
+            show_flying_message(self, "No file selected")
 
     def copy_file_name(self):
         if self.current_file_path:
             file_name = os.path.basename(self.current_file_path)
             QApplication.clipboard().setText(file_name)
-            self.show_flying_message(f"Copied: {file_name}")
+            show_flying_message(self, f"Copied: {file_name}")
         else:
-            self.show_flying_message("No file selected")
+            show_flying_message(self, "No file selected")
 
-    def show_flying_message(self, message, duration=4000):
-        if self.current_flying_label and not sip.isdeleted(self.current_flying_label):
-            self.current_flying_label.deleteLater()
-        
-        self.current_flying_label = FlyingLabel(self)
-        self.current_flying_label.setText(message)
-        self.current_flying_label.adjustSize()
-        
-        width = self.current_flying_label.width()
-        height = self.current_flying_label.height()
-        
-        start_y = int(self.height() * 0.53)
-        self.current_flying_label.move(self.width() // 2 - width // 2, start_y)
-        self.current_flying_label.y_position = start_y
-
-        self.current_flying_label.target_y = int(self.height() * 0.5 - height // 2)
-        self.current_flying_label.raise_()
-
-        self.current_flying_label.show()
-        self.current_flying_label.timer.start(16)
-
-        self.current_flying_label.stay_timer = QTimer(self.current_flying_label)
-        self.current_flying_label.stay_timer.setSingleShot(True)
-        self.current_flying_label.stay_timer.timeout.connect(self.current_flying_label.start_fade_out)
-        self.current_flying_label.stay_timer.start(duration)
-
+    # drag and drop #
     def dragEnterEvent(self, event):
         if event.mimeData().hasUrls():
+            self.drop_label.setProperty("dragOver", True)
+            self.drop_label.style().unpolish(self.drop_label)
+            self.drop_label.style().polish(self.drop_label)
+            self.drop_label.setText("Drop to load file")
             event.accept()
         else:
             event.ignore()
 
+    def dragLeaveEvent(self, event):
+        self.drop_label.setProperty("dragOver", False)
+        self.drop_label.style().unpolish(self.drop_label)
+        self.drop_label.style().polish(self.drop_label)
+        self.drop_label.setText("Drag a media file here to load")
+        super().dragLeaveEvent(event)
+
     def dropEvent(self, event):
+        self.drop_label.setProperty("dragOver", False)
+        self.drop_label.style().unpolish(self.drop_label)
+        self.drop_label.style().polish(self.drop_label)
         files = [u.toLocalFile() for u in event.mimeData().urls()]
         if files:
             self.current_file_path = files[0]
+            self.drop_label.setText("File opened successfully from drag and drop!")
             self.update_file_info()
+    # end frag and drop #
 
+    # click to open file #
     def open_file_dialog(self):
-        file_path, _ = QFileDialog.getOpenFileName(self, "Open Media File", "medias", "Media Files (*.mp3 *.mp4 *.avi *.mov *.wav *.m4a)")
+        file_path, _ = QFileDialog.getOpenFileName(
+            self, "Open Media File", "medias",
+            "Media Files (*.mp3 *.mp4 *.avi *.mov *.wav *.m4a)")
         if file_path:
             self.current_file_path = file_path
-            self.file_path_label.setText(f"File path: {file_path}")
             self.drop_label.setText("File opened successfully from explorer!")
             self.parse_file_duration_and_bitrate(file_path)
             self.update_file_info()
+    # end click to open file #
 
     def parse_file_duration_and_bitrate(self, file_path):
         try:
             self.file_duration, self.file_audio_bitrate = probe_media_file(file_path)
-            self.file_length_label.setText(f"File length: {self.file_duration:.2f} seconds, Audio bitrate: {self.file_audio_bitrate/1000:.2f} kbps")
+            self.file_length_label.setText(
+                f"File length: {self.file_duration:.2f} seconds, \
+                Audio bitrate: {self.file_audio_bitrate/1000:.2f} kbps")
         except Exception as e:
             self.file_length_label.setText(f"Error: {str(e)}")
 
     def update_file_info(self):
-        self.file_path_label.setText(f"File path: {self.current_file_path}")
-        self.drop_label.setText("File processed successfully!")
+        display_path = add_zero_wide_char_to_str(self.current_file_path)
+        self.file_path_label.setText(f"File path: {display_path}")
         self.parse_file_duration_and_bitrate(self.current_file_path)
         self.update_segments()
         
         # Find the main window and update the transcription tab
         main_window = self.get_main_window()
         if main_window and hasattr(main_window, 'update_transcription_tab'):
-            main_window.update_transcription_tab(self.current_file_path, self.file_duration)
+            main_window.update_transcription_tab(
+                self.current_file_path, self.file_duration, self.segment_bar.segments)
         else:
             print("Warning: Could not update transcription tab")
 
@@ -400,7 +356,7 @@ class TimeSlicerTab(TabInterface):
 
     def update_segments(self):
         if self.file_duration:
-            slices = get_time_slices(self.file_duration, self.current_file_path)
+            slices = get_time_slices(self.file_duration, self.file_audio_bitrate)
             self.segment_bar.set_segments(slices)
         else:
             self.segment_bar.set_segments([])
