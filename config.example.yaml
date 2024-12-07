@@ -1,0 +1,85 @@
+meta:
+  config-version: "1.0"
+  last_updated: "2024-11-17"
+api:
+  # token is the unique core, others surround it.
+  providers:
+    g----i:
+      endpoint: https://api.g----i.us
+      token: sk-F----------------------------------------------0
+    a------x:
+      endpoint: https://a------x.com
+      token: sk-B----------------------------------------------9
+    groq:
+      note: actually no openai models except whisper 3/3turbo
+      endpoint: https://api.groq.com/openai
+      token: gsk_SZ------------------------------------------------9Y
+      # requests accessing this endpoint should be behind a proxy
+      recommend-proxy: proxy1
+
+  models:
+    whisper-large-v3:
+      display-name: "Whisper Large v3" # human-readable name
+      # in what API scheme we interact with the model
+      api-scheme: openai-whisper # TODO: or use invoke-mode or API-call-mode? as we have relay apis that translate openai call to claude or gemini so that client thinks they are communicating with openai.
+      # the actual type of model, because we may have a claude model that
+      # uses openai API scheme
+      model-type: openai-whisper
+      providers:
+        groq:
+          # rate-limit not implemented
+          rate-limit: # is a {provider x model} thing, for the same provider some models are serial while others can tolerate concurrency.
+            type: serialized # serialized or concurrent
+            concurrent-settings:
+              requests-per-minute: 10
+              max-concurrent-calls: 3
+            serialized-settings:
+              # between previous API call return to next API call launch
+              cooldown-seconds: 3
+          timestamp_granularities: segment # default to word
+
+    whisper-1:
+      display-name: whisper large v2
+      api-scheme: openai-whisper
+      model-type: openai-whisper
+      providers:
+        g----i:
+          rate-limit:
+            type: serialized
+            concurrent-settings:
+              requests-per-minute: 3
+              max-concurrent-calls: 1
+            serialized-settings:
+              cooldown-seconds: 27
+        a------x:
+          rate-limit:
+            type: concurrent
+            concurrent-settings:
+              requests-per-minute: 10
+              max-concurrent-calls: 3
+            serialized-settings:
+              cooldown-seconds: 10
+
+  #------ end models ------#
+
+proxies:
+  proxy1:
+    type: http
+    host: 127.0.0.1
+    port: 1080
+    timeout: 10 # seconds
+
+tasks:
+  transcription:
+    max_segment_size: 15 # MB
+    default_segment_duration: 180 # seconds
+    overlap: 9 # seconds
+    models:
+      whisper-1:
+        note: openai basic whisper model
+      whisper-large-v3:
+        note: claimed higher quality than whisper-1, but may be tuned too aggresive
+
+paths:
+  tmp_dir: "./tmp_audio_segments"
+  result_dir: "./transcription_result"

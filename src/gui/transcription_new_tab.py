@@ -1,5 +1,6 @@
 from PyQt5.QtWidgets import (QWidget, QHBoxLayout, QVBoxLayout, QLabel, 
-                            QPushButton, QFileDialog, QTextEdit, QProgressBar)
+                            QPushButton, QFileDialog, QTextEdit, QProgressBar,
+                            QComboBox)
 from PyQt5.QtCore import QTimer, QThread, pyqtSignal
 from .tab_interface import TabInterface
 from .segment_bar import SegmentBar
@@ -11,11 +12,64 @@ class TranscriptionNewTab(TabInterface):
     def __init__(self):
         super().__init__("Transcription New")
         self.transcriber = WhisperTranscriber()
+        self.config = self._load_config()
         self.init_ui()
         self.file_path = None
         self.duration = None
         self.slices = None
         self.log_queue = []
+
+    def _load_config(self):
+        try:
+            with open('config.yaml', 'r') as f:
+                import yaml
+                return yaml.safe_load(f)
+        except Exception as e:
+            print(f"Error loading config: {e}")
+            return {}
+        
+    def _update_model_selector(self):
+        self.model_selector.clear()
+        self.model_selector.setEnabled(False)
+
+        try:
+            transcription_config = self.config.get('tasks', {})\
+                .get('transcription', {})
+            if not transcription_config or 'models' not in transcription_config:
+                self.model_selector.addItem("---not configured---")
+                self.model_selector.setEnabled(False)
+                return
+            models = transcription_config.get('models', {})
+            for model_name in models:
+                self.model_selector.addItem(model_name) 
+            self.model_selector.setEnabled(True)           
+        except (AttributeError, TypeError):
+            self.model_selector.addItem("---not configured---")
+            return
+            
+
+
+    def _on_model_changed(self, selected_model):
+        #if not self.provider_selector: return
+        self.provider_selector.clear()
+        
+        if selected_model in ["---not configured---", ""]:
+            self.provider_selector.addItem("---invalid model---")
+            self.provider_selector.setEnabled(False)
+            return
+            
+        # Get providers for selected model
+        model_providers = self.config.get('api', {}).get('models', {})\
+            .get(selected_model, {}).get('providers', {})
+        
+        if not model_providers:
+            self.provider_selector.addItem("---invalid model---")
+            self.provider_selector.setEnabled(False)
+            return
+            
+        self.provider_selector.setEnabled(True)
+        for provider in model_providers:
+            self.provider_selector.addItem(provider)
 
     def init_ui(self):
         # Main vertical layout
@@ -43,9 +97,27 @@ class TranscriptionNewTab(TabInterface):
         
         # Bottom section for buttons
         bottom_section = QHBoxLayout()
+        #   Model's provider Selection | dropdown menu
+        provider_label = QLabel("Provider:")
+        self.provider_selector = QComboBox()
+        self.provider_selector.setEnabled(False)
+        #   Model Selection | dropdown menu
+        model_label = QLabel("Model:")
+        self.model_selector = QComboBox()
+        self.model_selector.currentTextChanged.connect(self._on_model_changed)
+        self._update_model_selector()
+        #   Transcribe button
         self.transcribe_button = QPushButton("Transcribe")
         self.transcribe_button.clicked.connect(self.start_transcription)
         self.transcribe_button.setEnabled(False) # Disable initially
+        # Add to bottom section
+        bottom_section.addWidget(model_label)
+        bottom_section.addStretch()
+        bottom_section.addWidget(self.model_selector)
+        bottom_section.addStretch()
+        bottom_section.addWidget(provider_label)
+        bottom_section.addStretch()
+        bottom_section.addWidget(self.provider_selector)
         bottom_section.addStretch()
         bottom_section.addWidget(self.transcribe_button)
         
@@ -87,6 +159,14 @@ class TranscriptionNewTab(TabInterface):
             return
 
         try:
+            selected_model = self.model_selector.currentText()
+            selected_provider = self.provider_selector.currentText()
+            if selected_model in ["---not configured---"] or \
+                selected_provider in ["---invalid model---"]:
+                    show_flying_message(self, "Invalid model or provider selection")
+                    return
+            assert self.transcriber.set_model_and_provider(selected_model, selected_provider) is True
+
             self.transcribe_button.setEnabled(False)
             self.progress_bar.setValue(0)
             self.progress_bar.show()
@@ -131,7 +211,7 @@ class TranscriptionNewTab(TabInterface):
 
     def transcription_finished(self, success):
         if success:
-            self.log_display.append("Transcription completed successfully")
+            self.log_display.append("Transcription completed successfully B")
         else:
             self.log_display.append("Transcription failed")
         self.transcribe_button.setEnabled(True)
@@ -179,8 +259,10 @@ class TranscriptionThread(QThread):
                 self.segment_status_signal.emit(i, "completed")
                 progress = int(((i + 1) / total_slices) * 100)
                 self.progress_signal.emit(progress)
+
+                # TODO: apply rate control here
                 import time # delay 30 seconds before launching next transcribe request, for API throttling.
-                time.sleep(30)
+                time.sleep(10)
             
             self.finished_signal.emit(True)
         except Exception as e:

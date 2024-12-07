@@ -114,7 +114,7 @@ class TranscriptionTab(TabInterface):
             return_code = process.wait()
 
             if return_code == 0:
-                self.log_display.append("Transcription completed successfully")
+                self.log_display.append("Transcription completed successfully A")
             else:
                 self.log_display.append(f"Error during transcription. Return code: {return_code}")
         except Exception as e:
