@@ -12,15 +12,15 @@ The tool provides a graphical interface for slicing media files and managing tra
 ## Features
 
 - **Drag & Drop Interface**: Easy file loading through drag and drop or file browser
-![alt text](drag-and-drop-feature.png)
+![alt text](./doc/figs/drag-and-drop-feature.png)
 - **Media File Analysis**: Automatic detection of file duration and audio properties
-![alt text](media-file-analyzation.png)
+![alt text](./doc/figs/media-file-analyzation.png)
 - **Time Slicing**: Visual interface for viewing and managing media segments
-![alt text](time-slice-bar-normal.png)
+![alt text](./doc/figs/time-slice-bar-normal.png)
 - **Transcription**: Integration with OpenAI's Whisper API for accurate audio transcription
-![alt text](one-click-transcribe.png)
+![alt text](./doc/figs/one-click-transcribe.png)
 - **Progress Tracking**: Real-time progress monitoring of transcription tasks
-![alt text](transcribe-in-progress.png)
+![alt text](./doc/figs/transcribe-in-progress.png)
 - **Multi-format Support**: Handles various media formats (mp3, mp4, m4a, etc.)
 
 ## Prerequisites
@@ -43,8 +43,7 @@ The tool provides a graphical interface for slicing media files and managing tra
 
 ## Configuration Files
 
-- `api_key_archive`: Store your OpenAI API key
-- `api_endpoint`: OpenAI API endpoint URL (default: https://api.openai.com)
+copy the `config.example.yaml` as `config.yaml` and modify before using the transcriber.
 
 ## Usage
 
