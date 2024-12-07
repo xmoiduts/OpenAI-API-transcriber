@@ -8,3 +8,4 @@ api_endpoint
 transcription_result/**
 tmp_audio_segments/**
 *.pyc
+config.yaml
