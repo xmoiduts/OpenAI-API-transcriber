@@ -1,7 +1,9 @@
 from PyQt5.QtWidgets import QMainWindow, QTabWidget
-from .time_slicer_tab import TimeSlicerTab, get_stylesheet
+from .time_slicer_tab import TimeSlicerTab
 from .transcription_tab import TranscriptionTab
 from .transcription_new_tab import TranscriptionNewTab
+from .styles.style_manager import get_complete_stylesheet
+
 
 class MainWindow(QMainWindow):
     def __init__(self):
@@ -20,7 +22,7 @@ class MainWindow(QMainWindow):
         self.tab_widget.addTab(self.transcription_tab, "Transcription")
         self.tab_widget.addTab(self.transcription_new_tab, "Transcription New")
 
-        self.setStyleSheet(get_stylesheet())
+        self.setStyleSheet(get_complete_stylesheet())
 
     def update_transcription_tab(self, file_path, duration, slices):
         self.transcription_tab.update_from_other_tab(

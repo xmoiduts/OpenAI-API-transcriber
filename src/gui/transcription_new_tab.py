@@ -1,13 +1,18 @@
 from PyQt5.QtWidgets import (QWidget, QHBoxLayout, QVBoxLayout, QLabel, 
-                            QPushButton, QFileDialog, QTextEdit, QProgressBar,
+                            QPushButton, QFileDialog, QTextBrowser, QProgressBar,  # 改为 QTextBrowser
                             QComboBox)
-from PyQt5.QtCore import QTimer, QThread, pyqtSignal
+from PyQt5.QtCore import QTimer, QThread, pyqtSignal, Qt
 from .tab_interface import TabInterface
 from .segment_bar import SegmentBar
 from src.time_slicer.time_slicer import get_time_slices
 from src.transcriber_core.transcriber import WhisperTranscriber
 from .flying_message import show_flying_message
 from .util.add_zero_wide_char_to_str import add_zero_wide_char_to_str
+from .styles.style_manager import get_dropdown_stylesheet
+import os
+import sys
+import subprocess
+
 class TranscriptionNewTab(TabInterface):
     def __init__(self):
         super().__init__("Transcription New")
@@ -91,34 +96,43 @@ class TranscriptionNewTab(TabInterface):
         
         # Middle section for log
         middle_section = QVBoxLayout()
-        self.log_display = QTextEdit()
-        self.log_display.setReadOnly(True)
+        self.log_display = QTextBrowser()
+        self.log_display.setOpenExternalLinks(False)
         middle_section.addWidget(self.log_display)
+        self.cursor = self.log_display.textCursor()
         
         # Bottom section for buttons
         bottom_section = QHBoxLayout()
         #   Model's provider Selection | dropdown menu
         provider_label = QLabel("Provider:")
         self.provider_selector = QComboBox()
+        self.provider_selector.setStyleSheet(get_dropdown_stylesheet())
         self.provider_selector.setEnabled(False)
         #   Model Selection | dropdown menu
         model_label = QLabel("Model:")
         self.model_selector = QComboBox()
+        self.model_selector.setStyleSheet(get_dropdown_stylesheet())
         self.model_selector.currentTextChanged.connect(self._on_model_changed)
         self._update_model_selector()
         #   Transcribe button
         self.transcribe_button = QPushButton("Transcribe")
         self.transcribe_button.clicked.connect(self.start_transcription)
         self.transcribe_button.setEnabled(False) # Disable initially
+        #   Stop button
+        self.stop_button = QPushButton("⏹")
+        self.stop_button.setObjectName("stop_button")
+        self.stop_button.clicked.connect(self.stop_transcription)
+        self.stop_button.setEnabled(False)  # Initially disabled
+        self.stop_button.setFixedSize(32, 32)  # Make button square
         # Add to bottom section
-        bottom_section.addWidget(model_label)
         bottom_section.addStretch()
+        bottom_section.addWidget(model_label)
         bottom_section.addWidget(self.model_selector)
         bottom_section.addStretch()
         bottom_section.addWidget(provider_label)
-        bottom_section.addStretch()
         bottom_section.addWidget(self.provider_selector)
         bottom_section.addStretch()
+        bottom_section.addWidget(self.stop_button)
         bottom_section.addWidget(self.transcribe_button)
         
         # Add all sections to main layout
@@ -188,10 +202,12 @@ class TranscriptionNewTab(TabInterface):
             self.transcription_thread.segment_status_signal.connect(self.update_segment_status)
             self.transcription_thread.start()
 
+            self.stop_button.setEnabled(True)
+
         except Exception as e:
             import traceback
             error_message = f"Error during transcription: {str(e)}\n\nCall Stack:\n{traceback.format_exc()}"
-            self.log_display.append(error_message)
+            self.update_log(error_message)
             self.transcribe_button.setEnabled(True)
 
     def update_segment_status(self, segment_index, status):
@@ -204,18 +220,118 @@ class TranscriptionNewTab(TabInterface):
         self.log_queue.append(message)
 
     def update_log(self, message):
-        self.log_display.append(message)
+        self.cursor.movePosition(self.cursor.End)
+        self.cursor.insertText(message)
+        self.cursor.insertHtml("<br>")
         self.log_display.verticalScrollBar().setValue(
             self.log_display.verticalScrollBar().maximum()
         )
+    
+    def _get_result_directory(self):
+        """获取转录结果目录的路径，如果目录不存在则返回父目录"""
+        if not self.file_path:
+            return None
+        
+        try:
+            # 从环境变量获取项目根目录
+            project_root = os.environ.get('PROJECT_ROOT')
+            if not project_root:
+                self.update_log("Error: PROJECT_ROOT not set")
+                return None
+            
+            # 获取文件名（不含扩展名）
+            file_name_core = os.path.splitext(os.path.basename(self.file_path))[0]
+            
+            # 构建结果目录路径并规范化
+            result_dir = os.path.normpath(os.path.join(
+                project_root,
+                "transcription_result",
+                file_name_core
+            ))
+            
+            # 检查目录是否存在，如果不存在则尝试返回父目录
+            if not os.path.exists(result_dir):
+                parent_dir = os.path.dirname(result_dir)
+                if os.path.exists(parent_dir):
+                    return parent_dir
+                else:
+                    self.update_log(f"Directory not found: {result_dir}")
+                    return None
+                    
+            return result_dir
+            
+        except Exception as e:
+            self.update_log(f"Error determining result directory: {str(e)}")
+            return None
+
+    def open_result_directory(self):
+        result_dir = self._get_result_directory()
+        if not result_dir:
+            return
+            
+        try:
+            if sys.platform == "win32":
+                os.startfile(result_dir)
+            else: # not tested
+                import subprocess
+                subprocess.Popen(["xdg-open", result_dir]) 
+        except Exception as e:
+            self.update_log(f"Error opening directory: {str(e)}")
+
+    def open_in_vscode(self):
+        result_dir = self._get_result_directory()
+            
+        try:
+            subprocess.run(
+                ["code", "."],
+                cwd=result_dir,
+                check=True,
+                shell=True,  # 使用 shell 执行
+                capture_output=True,
+                text=True,
+            )
+        except FileNotFoundError:
+            self.update_log("VSCode not found in system PATH")
+        except Exception as e:
+            self.update_log(f"Error opening VSCode: {str(e)}")
+
+    def handle_link_click(self, url):
+        action = url.toString()
+        if action == 'open_dir':
+            self.open_result_directory()
+        elif action == 'open_vscode':
+            self.open_in_vscode()
 
     def transcription_finished(self, success):
         if success:
-            self.log_display.append("Transcription completed successfully B")
+            self.update_log("\nTranscription completed successfully B")
+            self.update_log("Actions:")
+            # 安全地断开旧的连接
+            try:
+                self.log_display.anchorClicked.disconnect(self.handle_link_click)
+            except TypeError:  # 如果信号未连接，会抛出 TypeError
+                pass
+            
+            self.log_display.insertHtml(" • <a href='open_dir'>Open Result Directory</a><br>")
+            self.log_display.insertHtml(" • <a href='open_vscode'>Open in VSCode</a><br>")
+            self.log_display.setReadOnly(True)
+            self.log_display.anchorClicked.connect(self.handle_link_click)
+            self.log_display.setOpenLinks(False)
+            self.log_display.setTextInteractionFlags(
+                Qt.TextInteractionFlag.TextBrowserInteraction
+            )
         else:
-            self.log_display.append("Transcription failed")
+            self.update_log("Transcription failed")
+        
         self.transcribe_button.setEnabled(True)
         self.progress_bar.hide()
+        self.stop_button.setEnabled(False)
+
+    def stop_transcription(self):
+        if hasattr(self, 'transcription_thread'):
+            self.transcription_thread.stop_requested = True
+            self.stop_button.setEnabled(False)
+            self.update_log("\nStopping transcription after current segment...")
 
 class TranscriptionThread(QThread):
     log_signal = pyqtSignal(str)
@@ -229,12 +345,18 @@ class TranscriptionThread(QThread):
         self.file_path = file_path
         self.slices = slices # list of (start: int?, duration: int?)
         self.actual_starts = actual_starts # list of int, len == slices
+        self.stop_requested = False
         assert len(self.slices) == len(self.actual_starts)
 
     def run(self):
         try:
             total_slices = len(self.slices)
             for i, (slice_start, duration) in enumerate(self.slices):
+                if self.stop_requested:
+                    self.log_signal.emit("\nTranscription stopped by user")
+                    self.finished_signal.emit(False)
+                    return
+
                 self.segment_status_signal.emit(i, "in_progress")
                 self.log_signal.emit(f"\nProcessing segment {i+1}/{total_slices}")
                 actual_start = self.actual_starts[i]
@@ -262,7 +384,7 @@ class TranscriptionThread(QThread):
 
                 # TODO: apply rate control here
                 import time # delay 30 seconds before launching next transcribe request, for API throttling.
-                time.sleep(10)
+                time.sleep(30)
             
             self.finished_signal.emit(True)
         except Exception as e:

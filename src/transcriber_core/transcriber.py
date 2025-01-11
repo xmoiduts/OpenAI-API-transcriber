@@ -111,7 +111,8 @@ class WhisperTranscriber:
             # Cut audio segment using ffmpeg
             self._log(log_callback, "Cutting audio segment...")
             if not self._cut_audio_segment(
-                input_path, audio_segment, actual_start, duration, log_callback):
+                input_path, audio_segment, actual_start, 
+                duration - (actual_start - display_start), log_callback):
                 return None
 
             # Prepare output directory and file
@@ -260,8 +261,7 @@ class WhisperTranscriber:
                 
                 result = response.json()
                 # Adjust timestamps in result
-                time_offset = actual_start - display_start
-                result = self._adjust_timestamps(result, time_offset)
+                result = self._adjust_timestamps(result, actual_start)
                 # groq mitigation:
                 result_seg = None
                 if self.timestamp_granularities == 'segment':
@@ -276,7 +276,7 @@ class WhisperTranscriber:
                     segment_file = result_file.parent / (result_file.stem + "_segments.json")
                     with open(segment_file, 'w', encoding='utf-8') as f:
                         json.dump(result_seg, f, ensure_ascii=False, indent=2)
-                        self._log(log_callback, f"dumped {f}")
+                        #self._log(log_callback, f"dumped {f}")
                 
                 return result
         except requests.exceptions.HTTPError as e:
@@ -305,12 +305,13 @@ class WhisperTranscriber:
         # Create a deep copy to avoid modifying the original
         adjusted = result.copy()
 
+        # WHY the two duration adjustments below?
         # preserve whisper-transcribed duration
         adjusted["real_duration"] = result["duration"]
         
         # Adjust duration if present
         if 'duration' in adjusted:
-            adjusted['duration'] += time_offset
+           adjusted['duration'] += time_offset
         
         # Adjust word-level timestamps
         if 'words' in adjusted:
@@ -353,6 +354,8 @@ class WhisperTranscriber:
         
         # Convert segments to words format
         words = []
+        # segment timestamp-specific, assembling all the segments to a paragraph.
+        sentences = " ".join([segment['text'].strip() for segment in segment_result['segments']])
         for segment in segment_result['segments']:
             word_entry = {
                 'word': segment['text'].strip(),
@@ -362,6 +365,7 @@ class WhisperTranscriber:
             words.append(word_entry)
         
         # Replace segments with words in result
+        word_result['sentences'] = sentences
         word_result['words'] = words
         if 'segments' in word_result:
             del word_result['segments']

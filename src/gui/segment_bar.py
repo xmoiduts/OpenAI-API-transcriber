@@ -4,12 +4,14 @@ from PyQt5.QtWidgets import (QFrame, QToolTip, QMenu, QWidgetAction,
 from PyQt5.QtCore import Qt, QRectF, QEvent
 from PyQt5.QtGui import QPainter, QPen, QColor, QFont
 from .draggable_label import DraggableLabel
+from .styles.style_manager import get_complete_stylesheet
 
 class SegmentBar(QFrame):
     def __init__(self, parent=None, mode="time_slicer"):
         super().__init__(parent)
         self.setFixedHeight(30)
-        self.setStyleSheet("background-color: #d3d3d3; border-radius: 5px;")
+        self.setObjectName("segment_bar")  # Add object name for styling
+        self.setStyleSheet(get_complete_stylesheet())
         self.segments = [] # list of (start: int?, duration: int?)
         self.setMouseTracking(True)
         self.hovered_segment = -1
@@ -17,68 +19,68 @@ class SegmentBar(QFrame):
         self.segment_status = {}  # For transcription status
         self.segment_start_offsets = []  # List of time offsets (int) in seconds
 
-    def get_hms_editor_stylesheet(self):
-        return """
-            QMenu {
-                background-color: #f0f0f0;
-                border: 1px solid #d0d0d0;
-                border-radius: 4px;
-                padding: 4px;
-                font-family: Arial, sans-serif;
-            }
-            QMenu::item {
-                padding: 4px 20px;
-                color: #333333;
-            }
-            QMenu::item:selected {
-                background-color: #e0e0e0;
-            }
-            QMenu::separator {
-                height: 1px;
-                background-color: #d0d0d0;
-                margin: 4px 0px;
-            }
-            QWidget#hms_editor {
-                background-color: #f0f0f0;
-                padding: 8px;
-            }
-            QLabel {
-                background-color: #f0f0f0;
-                color: #333333;
-                font-size: 14px;
-            }
-            QPushButton#reset_button {
-                background-color: #FFB3B3;
-                color: white;
-                border: none;
-                padding: 6px 12px;
-                border-radius: 4px;
-                font-weight: bold;
-            }
-            QPushButton#reset_button:hover {
-                background-color: #FFA0A0;
-            }
-            QLineEdit {
-                background-color: white;
-                border: 1px solid #d0d0d0;
-                border-radius: 4px;
-                padding: 4px;
-                color: #333333;
-                font-size: 14px;
-                font-weight: bold;
-            }
-            QLineEdit:focus {
-                border: 1px solid #4CAF50;
-            }
-            QToolTip {
-                background-color: #f0f0f0;
-                color: #333333;
-                border: 1px solid #d0d0d0;
-                border-radius: 4px;
-                padding: 8px;
-                font-size: 14px;
-            }
-        """
+    # def get_hms_editor_stylesheet(self):
+    #     return """
+    #         QMenu {
+    #             background-color: #f0f0f0;
+    #             border: 1px solid #d0d0d0;
+    #             border-radius: 4px;
+    #             padding: 4px;
+    #             font-family: Arial, sans-serif;
+    #         }
+    #         QMenu::item {
+    #             padding: 4px 20px;
+    #             color: #333333;
+    #         }
+    #         QMenu::item:selected {
+    #             background-color: #e0e0e0;
+    #         }
+    #         QMenu::separator {
+    #             height: 1px;
+    #             background-color: #d0d0d0;
+    #             margin: 4px 0px;
+    #         }
+    #         QWidget#hms_editor {
+    #             background-color: #f0f0f0;
+    #             padding: 8px;
+    #         }
+    #         QLabel {
+    #             background-color: #f0f0f0;
+    #             color: #333333;
+    #             font-size: 14px;
+    #         }
+    #         QPushButton#reset_button {
+    #             background-color: #FFB3B3;
+    #             color: white;
+    #             border: none;
+    #             padding: 6px 12px;
+    #             border-radius: 4px;
+    #             font-weight: bold;
+    #         }
+    #         QPushButton#reset_button:hover {
+    #             background-color: #FFA0A0;
+    #         }
+    #         QLineEdit {
+    #             background-color: white;
+    #             border: 1px solid #d0d0d0;
+    #             border-radius: 4px;
+    #             padding: 4px;
+    #             color: #333333;
+    #             font-size: 14px;
+    #             font-weight: bold;
+    #         }
+    #         QLineEdit:focus {
+    #             border: 1px solid #4CAF50;
+    #         }
+    #         QToolTip {
+    #             background-color: #f0f0f0;
+    #             color: #333333;
+    #             border: 1px solid #d0d0d0;
+    #             border-radius: 4px;
+    #             padding: 8px;
+    #             font-size: 14px;
+    #         }
+    #     """
 
     def set_segments(self, segments):
         self.segments = segments
@@ -236,13 +238,7 @@ class SegmentBar(QFrame):
         """Create a circular help icon with question mark"""
         label = QLabel(parent)
         label.setFixedSize(16, 16)
-        label.setStyleSheet("""
-            QLabel {
-                background-color: transparent;
-                color: inherit;
-                font-family: inherit;
-            }
-        """)
+        label.setObjectName("help_icon")
         label.setToolTip(
             "Adjust the start time to optimize Whisper model transcription.\n"
             "When audio begins with music or non-speech content,\n"
@@ -305,7 +301,7 @@ class SegmentBar(QFrame):
             return
             
         menu = QMenu(self)
-        menu.setStyleSheet(self.get_hms_editor_stylesheet())
+        menu.setStyleSheet(get_complete_stylesheet())
         
         # Add placeholder items
         menu.addAction("Placeholder 1")

@@ -14,81 +14,106 @@ import subprocess
 from PyQt5 import sip
 from .flying_message import show_flying_message
 from .util.add_zero_wide_char_to_str import add_zero_wide_char_to_str
+from .styles.style_manager import get_complete_stylesheet
 
-def get_stylesheet():
-    return """
-        QMainWindow, QWidget {
-            background-color: #f0f0f0;
-            font-family: Arial, sans-serif;
-        }
-        QLabel, QPushButton, QTabBar::tab {
-            color: #333333;
-            font-size: 14px;
-        }
-        QPushButton {
-            background-color: #4CAF50;
-            color: white;
-            border: none;
-            padding: 8px 16px;
-            border-radius: 4px;
-        }
-        QPushButton:hover {
-            background-color: #45a049;
-        }
-        QPushButton:disabled {
-            background-color: #a0a0a0;
-            color: #d0d0d0;
-        }
-        QLabel#drop_label {
-            border: 2px dashed #aaa;
-            padding: 20px;
-            background-color: #ffffff;
-            border-radius: 8px;
-            font-size: 18px;
-            font-weight: bold;
-            color: #888888;
-            /*unfortunately, no transition for QSS*/
-        }
-        QLabel#drop_label[dragOver="true"] {
-            border: 2px dashed #4CAF50;
-            background-color: #E8F5E9;
-            color: #4CAF50;
-        }
-        QPushButton#open_file_button {
-            background-color: #4CAF50;
-            color: white;
-        }
-        QPushButton#open_file_button:hover {
-            background-color: #45a049;
-        }
-        QPushButton#reload_button {
-            background-color: #FFB3B3;
-            color: white;
-            font-weight: bold;
-        }
-        QPushButton#reload_button:hover {
-            background-color: #FFA0A0;
-        }
-        QTabWidget::pane {
-            border: 1px solid #d0d0d0;
-            border-radius: 4px;
-        }
-        QTabBar::tab {
-            background-color: #e0e0e0;
-            border: 1px solid #c0c0c0;
-            border-bottom-color: #d0d0d0;
-            border-top-left-radius: 4px;
-            border-top-right-radius: 4px;
-            padding: 2px 5px;  /* Reduced padding to decrease height */
-            margin-right: 2px;
-        }
-        QTabBar::tab:selected, QTabBar::tab:hover {
-            background-color: #f0f0f0;
-        }
-        QTabBar::tab:selected {
-            border-bottom-color: #f0f0f0;
-        }
-    """
+# def get_stylesheet():
+#     return """
+#         QMainWindow, QWidget {
+#             background-color: #f0f0f0;
+#             font-family: Arial, sans-serif;
+#         }
+#         QLabel, QPushButton, QTabBar::tab {
+#             color: #333333;
+#             font-size: 14px;
+#         }
+#         QPushButton {
+#             background-color: #4CAF50;
+#             color: white;
+#             border: none;
+#             padding: 8px 16px;
+#             border-radius: 4px;
+#         }
+#         QPushButton:hover {
+#             background-color: #45a049;
+#         }
+#         QPushButton:disabled {
+#             background-color: #a0a0a0;
+#             color: #d0d0d0;
+#         }
+#         QLabel#drop_label {
+#             border: 2px dashed #aaa;
+#             padding: 20px;
+#             background-color: #ffffff;
+#             border-radius: 8px;
+#             font-size: 18px;
+#             font-weight: bold;
+#             color: #888888;
+#             /*unfortunately, no transition for QSS*/
+#         }
+#         QLabel#drop_label[dragOver="true"] {
+#             border: 2px dashed #4CAF50;
+#             background-color: #E8F5E9;
+#             color: #4CAF50;
+#         }
+#         QPushButton#open_file_button {
+#             background-color: #4CAF50;
+#             color: white;
+#         }
+#         QPushButton#open_file_button:hover {
+#             background-color: #45a049;
+#         }
+#         QPushButton#reload_button {
+#             background-color: #FFB3B3;
+#             color: white;
+#             font-weight: bold;
+#         }
+#         QPushButton#reload_button:hover {
+#             background-color: #FFA0A0;
+#         }
+#         QTabWidget::pane {
+#             border: 1px solid #d0d0d0;
+#             border-radius: 4px;
+#         }
+#         QTabBar::tab {
+#             background-color: #e0e0e0;
+#             border: 1px solid #c0c0c0;
+#             border-bottom-color: #d0d0d0;
+#             border-top-left-radius: 4px;
+#             border-top-right-radius: 4px;
+#             padding: 2px 5px;  /* Reduced padding to decrease height */
+#             margin-right: 2px;
+#         }
+#         QTabBar::tab:selected, QTabBar::tab:hover {
+#             background-color: #f0f0f0;
+#         }
+#         QTabBar::tab:selected {
+#             border-bottom-color: #f0f0f0;
+#         }
+#         QComboBox {
+#             background-color: #ffffff;
+#             border: 1px solid #c0c0c0;
+#             border-radius: 4px;
+#             padding: 5px;
+#             min-width: 100px;
+#         }
+#         QComboBox:hover {
+#             border: 1px solid #4CAF50;
+#         }
+#         QComboBox:disabled {
+#             background-color: #f0f0f0;
+#             color: #a0a0a0;
+#         }
+#         QComboBox::drop-down {
+#             border: none;
+#             padding-right: 10px;
+#         }
+#         # QComboBox::down-arrow {
+#         #     /* Unicode triangle character ▼ */
+#         #     color: #666666;
+#         #     font-size: 12px;
+#         # }
+# }
+#     """
 
 """
 class SegmentBar(QFrame):
@@ -176,7 +201,7 @@ class TimeSlicerTab(TabInterface):
         self.current_flying_label = None
 
         self.init_ui()
-        self.setStyleSheet(get_stylesheet())
+        self.setStyleSheet(get_complete_stylesheet())
 
     def init_ui(self):
         layout = QVBoxLayout()
