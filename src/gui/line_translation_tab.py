@@ -203,19 +203,11 @@ class WorkspacePanel(QWidget):
         
         # 获取scroll_offset
         scroll_offset = self.parent_panel.scroll_area.horizontalScrollBar().value()
-        
-        # 计算source panel的可视宽度
-        source_visible_width = min(
-            self.parent_panel.source_width,  # source panel的完整宽度
-            self.parent_panel.source_width - scroll_offset  # 考虑滚动偏移后的可视宽度
-        )
-        source_visible_width = max(0, source_visible_width)  # 确保不为负
-        
-        # 计算workspace的可视宽度（总视口宽度减去可见的source和status宽度）
-        workspace_visible_width = viewport_width
+
         if scroll_offset < self.parent_panel.source_width:
-            # 如果source panel还有部分可见，减去其可见部分
-            workspace_visible_width -= source_visible_width
+            workspace_visible_width = viewport_width - (self.parent_panel.source_width + self.parent_panel.status_width - scroll_offset)
+        else:
+            workspace_visible_width = viewport_width - self.parent_panel.status_width
 
         # left_offset: offset of the leftmost visible position
         # of the workspace panel from the left edge of the window
@@ -231,7 +223,26 @@ class WorkspacePanel(QWidget):
         # 更新导航条布局
         self.nav_bar.update_layout(
             unit_count=6,  # 实际应从数据获取
-            total_content_width=total_width,
-            workspace_visible_width=workspace_visible_width,  # 使用workspace的实际可视宽度
-            workspace_left_offset=left_offset
+            external_total_width=total_width,
+            external_visible_width=workspace_visible_width,  # 使用workspace的实际可视宽度
+            left_offset=left_offset
         )
+
+    def handle_marker_drag(self, progress_ratio):
+        """处理导航条标记拖动事件
+        
+        Args:
+            progress_ratio: 拖动进度比例 (0-1)
+        """
+        # 获取滚动条
+        scrollbar = self.parent_panel.scroll_area.horizontalScrollBar()
+        #print(f"Progress ratio: {progress_ratio}")
+        # 计算工作区的总可滚动范围
+        workspace_scroll_range = (self.trans_units_container.width() - 
+                            self.parent_panel.scroll_area.viewport().width())
+        
+        # 计算目标滚动位置
+        target_scroll = self.parent_panel.source_width + self.parent_panel.status_width + int(progress_ratio * workspace_scroll_range)
+        
+        # 更新滚动条位置
+        scrollbar.setValue(target_scroll)
