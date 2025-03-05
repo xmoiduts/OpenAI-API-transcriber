@@ -205,6 +205,45 @@ def get_dropdown_stylesheet():
         }
     """
 
+def get_translation_button_stylesheet():
+    """Styles for translation-related buttons"""
+    return """
+        QPushButton#open_file_btn {
+            background-color: #4CAF50;
+            color: white;
+            border: none;
+            padding: 8px 16px;
+            border-radius: 4px;
+        }
+        QPushButton#open_file_btn:hover {
+            background-color: #45a049;
+        }
+        
+        QPushButton#load_context_btn {
+            background-color: #2196F3;
+            color: white;
+            border: none;
+            padding: 8px 16px;
+            border-radius: 4px;
+        }
+        QPushButton#load_context_btn:hover {
+            background-color: #0b7dda;
+        }
+        
+        QPushButton#load_to_workspace_btn {
+            background-color: #FF9800;
+            color: white;
+            border: none;
+            padding: 8px 16px;
+            border-radius: 4px;
+            font-weight: bold;
+            font-size: 16px;
+        }
+        QPushButton#load_to_workspace_btn:hover {
+            background-color: #e68a00;
+        }
+    """
+
 def get_complete_stylesheet():
     """Combines all stylesheets"""
     return "\n".join([
@@ -214,5 +253,6 @@ def get_complete_stylesheet():
         get_input_stylesheet(),
         get_segment_bar_stylesheet(),
         get_dropdown_stylesheet(),
-        get_time_slicer_stylesheet()
+        get_time_slicer_stylesheet(),
+        get_translation_button_stylesheet()
     ])

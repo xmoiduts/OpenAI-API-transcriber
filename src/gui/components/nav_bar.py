@@ -49,8 +49,11 @@ class NavigationBar(QFrame):
         """计算进度比例"""
         if external_total_width <= 0:
             return 0
-            
-        progress_ratio = external_left_offset / (external_total_width - external_visible_width) # 假定marker的移动范围是相对于external_visible_width的
+
+        try:
+            progress_ratio = external_left_offset / (external_total_width - external_visible_width) # 假定marker的移动范围是相对于external_visible_width的
+        except ZeroDivisionError:
+            progress_ratio = 0
         return max(0, min(1, progress_ratio))
 
     def _calculate_content_offset(self, progress_ratio, thumbnail_total_width, external_visible_width):
@@ -167,9 +170,11 @@ class NavigationBar(QFrame):
         # 立即通知父组件
         print("drag")
         if self.parent() and hasattr(self.parent(), 'handle_marker_drag'):
-            progress = new_content_x / max_travel
+            try:
+                progress = new_content_x / max_travel
+            except ZeroDivisionError:
+                progress = 0
             self.parent().handle_marker_drag(progress)
-
     def mouseMoveEvent(self, event):
         """处理导航条的鼠标移动事件"""
         if self.dragging:
@@ -188,9 +193,10 @@ class NavigationBar(QFrame):
             
             # 通知父组件
             if self.parent() and hasattr(self.parent(), 'handle_marker_drag'):
-                progress = new_content_x / max_travel
-                
-                print("move")
+                try:
+                    progress = new_content_x / max_travel
+                except ZeroDivisionError:
+                    progress = 0
                 self.parent().handle_marker_drag(progress)
 
     def mouseReleaseEvent(self, event):

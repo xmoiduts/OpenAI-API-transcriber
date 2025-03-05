@@ -9,3 +9,4 @@ transcription_result/**
 tmp_audio_segments/**
 *.pyc
 config.yaml
+原文整块.txt
