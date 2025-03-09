@@ -1,14 +1,16 @@
 import re
-from PyQt5.QtCore import Qt, QSize, QTimer, QEvent, pyqtSignal, QRect
+from PyQt5.QtCore import Qt, QSize, QTimer, QEvent, pyqtSignal, QRect, QPoint
 from PyQt5.QtGui import QTextOption, QTextCursor, QTextBlock, QTextDocument, QPainter, QColor
 from PyQt5.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QTextEdit, QLabel, QPushButton,
-    QSplitter, QFrame, QScrollBar, QApplication
+    QSplitter, QFrame, QScrollBar, QApplication, QScrollArea
 )
+# 添加样式导入
+from src.gui.styles.style_manager import get_scrollbar_stylesheet
 
 class SyncedTextEdit(QTextEdit):
     """
-    自定义文本编辑器，支持行对齐和同步滚动
+    自定义文本编辑器，支持行对齐，无内部滚动
     """
     contentChanged = pyqtSignal()
     
@@ -17,11 +19,18 @@ class SyncedTextEdit(QTextEdit):
         self.partner = partner
         self.setWordWrapMode(QTextOption.WrapAnywhere)  # 按字符而非按单词换行
         self.setLineWrapMode(QTextEdit.WidgetWidth)  # 按控件宽度换行
-        self.document().contentsChanged.connect(self.contentChanged)
-        self.syncing_scroll = False
-        self.line_heights = {}  # 存储每行的高度信息
         
-        # 应用样式
+        # 跟踪document内容变化和行数变化
+        self.document().contentsChanged.connect(self.contentChanged)
+        self.document().contentsChanged.connect(self.checkLineCountChange)
+        
+        # 跟踪最后计算的显示行数
+        self.last_display_line_count = 0
+        
+        # 禁用垂直滚动条
+        self.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        
+        # 应用样式 TODO: apply to and use style_manager.py
         self.setStyleSheet("""
             QTextEdit {
                 font-family: 'Source Code Pro', 'Consolas', monospace;
@@ -35,17 +44,49 @@ class SyncedTextEdit(QTextEdit):
     def setPartner(self, partner):
         """设置伙伴编辑器"""
         self.partner = partner
-        
-        # 连接滚动信号
-        if partner:
-            self.verticalScrollBar().valueChanged.connect(self.syncPartnerScroll)
     
-    def syncPartnerScroll(self, value):
-        """同步伙伴编辑器的滚动位置"""
-        if self.partner and not self.syncing_scroll and not self.partner.syncing_scroll:
-            self.partner.syncing_scroll = True
-            self.partner.verticalScrollBar().setValue(value)
-            QTimer.singleShot(10, lambda: setattr(self.partner, 'syncing_scroll', False))
+    def resizeEvent(self, event):
+        """重写调整大小事件，检测宽度变化导致的行数变化"""
+        if event.oldSize().width() != event.size().width():
+            # 当宽度变化时，可能会影响换行，需要重新计算高度
+            QTimer.singleShot(0, self.checkLineCountChange)
+        super().resizeEvent(event)
+    
+    def checkLineCountChange(self):
+        """检查显示行数是否变化，如果变化则调整高度"""
+        # 计算当前显示的行数（包含换行后的行）
+        current_display_line_count = self.getDisplayLineCount()
+        
+        # 如果显示行数变化，调整高度
+        if current_display_line_count != self.last_display_line_count:
+            self.last_display_line_count = current_display_line_count
+            self.adjustHeightToContent()
+    
+    def getDisplayLineCount(self):
+        """计算文档显示的总行数，包含换行产生的行"""
+        doc = self.document()
+        total_lines = 0
+        
+        # 遍历所有块（逻辑行）
+        for i in range(doc.blockCount()):
+            block = doc.findBlockByNumber(i)
+            layout = block.layout()
+            
+            # 统计这个块的显示行数（可能因换行而增加）
+            if layout is not None:
+                total_lines += layout.lineCount()
+            else:
+                total_lines += 1  # 如果layout不可用，至少计为1行
+                
+        return total_lines
+    
+    def adjustHeightToContent(self):
+        """调整高度以适应所有内容"""
+        # 计算文档高度
+        doc_height = self.document().size().height()
+        # 添加额外空间，确保所有内容可见
+        padding = 30  # 增加更多空间确保所有内容都可见
+        self.setMinimumHeight(int(doc_height + padding))
     
     def createMimeDataFromSelection(self):
         """重写以确保复制的文本不包含控制字符"""
@@ -57,82 +98,11 @@ class SyncedTextEdit(QTextEdit):
             mime_data.setText(text)
         return mime_data
 
-    def recalculateLineHeights(self):
-        """
-        重新计算所有行的高度信息
-        返回每个文档行的实际行高(含折行)
-        """
-        doc = self.document()
-        self.line_heights = {}
-        
-        for i in range(doc.blockCount()):
-            block = doc.findBlockByNumber(i)
-            layout = block.layout()
-            
-            # 获取这个文本块的行数（单行或折行后的多行）
-            line_count = layout.lineCount()
-            
-            # 计算这个块的总高度
-            total_height = 0
-            for j in range(line_count):
-                line = layout.lineAt(j)
-                total_height += line.height()
-            
-            self.line_heights[i] = {
-                'line_count': line_count,
-                'total_height': total_height
-            }
-            
-        return self.line_heights
-    
-    def insertEmptyLines(self, block_number, count):
-        """在指定块后插入空行"""
-        if count <= 0:
-            return
-        
-        cursor = QTextCursor(self.document().findBlockByNumber(block_number))
-        cursor.movePosition(QTextCursor.EndOfBlock)
-        
-        for _ in range(count):
-            cursor.insertText("\n")
-    
-    def ensurePartnerLineAlignment(self):
-        """确保与伙伴编辑器的行对齐"""
-        if not self.partner:
-            return
-            
-        my_heights = self.recalculateLineHeights()
-        partner_heights = self.partner.recalculateLineHeights()
-        
-        # 暂时断开内容变化信号连接，避免递归调用
-        self.document().contentsChanged.disconnect(self.contentChanged)
-        self.partner.document().contentsChanged.disconnect(self.partner.contentChanged)
-        
-        # 对每个块进行比较和调整
-        common_blocks = min(len(my_heights), len(partner_heights))
-        
-        for i in range(common_blocks):
-            my_lines = my_heights.get(i, {}).get('line_count', 1)
-            partner_lines = partner_heights.get(i, {}).get('line_count', 1)
-            
-            # 确定哪一边需要添加空行
-            diff = abs(my_lines - partner_lines)
-            if diff > 0:
-                if my_lines < partner_lines:
-                    # 我需要添加空行
-                    self.insertEmptyLines(i, diff)
-                else:
-                    # 伙伴需要添加空行
-                    self.partner.insertEmptyLines(i, diff)
-        
-        # 重新连接信号
-        self.document().contentsChanged.connect(self.contentChanged)
-        self.partner.document().contentsChanged.connect(self.partner.contentChanged)
 
-
-class EditorPanel(QWidget):
+class EditorPanel(QScrollArea):
     """
     编辑器面板基类，包含标题和文本编辑器
+    现在是一个可滚动区域，内部内容可垂直滚动
     """
     def __init__(self, title, parent=None):
         super().__init__(parent)
@@ -140,8 +110,18 @@ class EditorPanel(QWidget):
         self.init_ui()
     
     def init_ui(self):
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(5, 5, 5, 5)
+        # 设置滚动区域属性
+        self.setWidgetResizable(True)
+        self.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        
+        # 创建内容容器
+        self.content_widget = QWidget()
+        self.setWidget(self.content_widget)
+        
+        # 创建布局
+        self.layout = QVBoxLayout(self.content_widget)
+        self.layout.setContentsMargins(5, 5, 5, 5)
         
         # 标题
         title_layout = QHBoxLayout()
@@ -151,10 +131,18 @@ class EditorPanel(QWidget):
         title_layout.addStretch()
         
         # 添加标题布局
-        layout.addLayout(title_layout)
+        self.layout.addLayout(title_layout)
         
         # 文本编辑器实例将由子类创建
         self.editor = None
+        
+        # 应用美化的滚动条样式
+        self.setStyleSheet("""
+            QScrollArea {
+                background-color: #f5f5f5;
+                border: none;
+            }
+        """ + get_scrollbar_stylesheet())
 
 
 class OriginalPanel(EditorPanel):
@@ -168,47 +156,46 @@ class OriginalPanel(EditorPanel):
     def init_ui(self):
         super().init_ui()
         
-        layout = self.layout()
-        
         # 添加翻译按钮到标题栏
         translate_button = QPushButton("Translate")
         translate_button.setFixedWidth(100)
         translate_button.clicked.connect(self.translateRequested)
-        title_layout = layout.itemAt(0).layout()
+        title_layout = self.layout.itemAt(0).layout()
         title_layout.insertWidget(1, translate_button)
         
-        # 创建原文编辑器
-        self.editor = SyncedTextEdit(parent=self)
-        layout.addWidget(self.editor)
-        
         # 添加系统提示区域
-        layout.addWidget(QLabel("System Prompt:"))
+        self.layout.addWidget(QLabel("System Prompt:"))
         self.system_prompt = QTextEdit()
         self.system_prompt.setMaximumHeight(80)
-        layout.addWidget(self.system_prompt)
+        self.layout.addWidget(self.system_prompt)
         
         # 添加范围说明区域
-        layout.addWidget(QLabel("Range Summary:"))
+        self.layout.addWidget(QLabel("Range Summary:"))
         self.range_summary = QTextEdit()
         self.range_summary.setMaximumHeight(60)
-        layout.addWidget(self.range_summary)
+        self.layout.addWidget(self.range_summary)
         
         # 添加历史结果区域
-        layout.addWidget(QLabel("History Results:"))
+        self.layout.addWidget(QLabel("History Results:"))
         self.history_results = QTextEdit()
         self.history_results.setMaximumHeight(120)
-        layout.addWidget(self.history_results)
+        self.layout.addWidget(self.history_results)
         
         # 添加术语表区域
-        layout.addWidget(QLabel("Terminology:"))
+        self.layout.addWidget(QLabel("Terminology:"))
         self.terminology = QTextEdit()
         self.terminology.setMaximumHeight(100)
-        layout.addWidget(self.terminology)
+        self.layout.addWidget(self.terminology)
+        
+        # 创建原文编辑器（移到底部）
+        self.layout.addWidget(QLabel("Original Content:"))
+        self.editor = SyncedTextEdit(parent=self.content_widget)
+        self.layout.addWidget(self.editor)
         
         # 底部翻译按钮
         bottom_translate = QPushButton("Translate")
         bottom_translate.clicked.connect(self.translateRequested)
-        layout.addWidget(bottom_translate)
+        self.layout.addWidget(bottom_translate)
 
 
 class TranslationPanel(EditorPanel):
@@ -223,15 +210,17 @@ class TranslationPanel(EditorPanel):
     def init_ui(self):
         super().init_ui()
         
-        layout = self.layout()
+        # 添加单个占位区域，使译文编辑器的垂直偏移与原文编辑器一致
+        single_spacer = QWidget()
+        # 计算占位高度：系统提示(80) + 范围说明(60) + 历史结果(120) + 术语表(100) + 标签高度和间距
+        spacer_height = 400  # 估算高度，包含了所有原文面板中上下文区域的高度总和
+        single_spacer.setFixedHeight(spacer_height)
+        self.layout.addWidget(single_spacer)
         
-        # 创建占位区域匹配原文面板高度
-        spacer = QWidget()
-        layout.addWidget(spacer)
-        
-        # 创建译文编辑器
-        self.editor = SyncedTextEdit(parent=self)
-        layout.addWidget(self.editor)
+        # 创建译文编辑器（移到底部）
+        self.layout.addWidget(QLabel("Translation Content:"))
+        self.editor = SyncedTextEdit(parent=self.content_widget)
+        self.layout.addWidget(self.editor)
         
         # 添加按钮区域
         button_layout = QHBoxLayout()
@@ -244,7 +233,7 @@ class TranslationPanel(EditorPanel):
         
         button_layout.addWidget(continue_button)
         button_layout.addWidget(load_next_button)
-        layout.addLayout(button_layout)
+        self.layout.addLayout(button_layout)
 
 
 class TranslationUnit(QWidget):
@@ -255,7 +244,7 @@ class TranslationUnit(QWidget):
         super().__init__(parent)
         self.unit_id = unit_id or "L1-L100"
         self.init_ui()
-        self.setup_line_sync()
+        self.setup_panel_sync()
     
     def init_ui(self):
         layout = QHBoxLayout(self)
@@ -293,23 +282,105 @@ class TranslationUnit(QWidget):
             }
         """)
     
-    def setup_line_sync(self):
-        """设置行同步机制"""
+    def setup_panel_sync(self):
+        """设置面板滚动同步机制"""
         # 设置编辑器伙伴关系
         self.original_panel.editor.setPartner(self.translation_panel.editor)
         self.translation_panel.editor.setPartner(self.original_panel.editor)
         
-        # 连接内容变化信号到行对齐函数
-        self.original_panel.editor.contentChanged.connect(self.synchronize_lines)
-        self.translation_panel.editor.contentChanged.connect(self.synchronize_lines)
+        # 连接面板滚动条信号
+        self.original_panel.verticalScrollBar().valueChanged.connect(self.sync_panel_scroll)
+        self.translation_panel.verticalScrollBar().valueChanged.connect(self.sync_panel_scroll)
+        
+        # 滚动同步标志
+        self.original_panel.syncing_scroll = False
+        self.translation_panel.syncing_scroll = False
     
-    def synchronize_lines(self):
-        """同步原文和译文的行高"""
+    def sync_panel_scroll(self, value):
+        """同步面板滚动位置，使用多段变换策略"""
         sender = self.sender()
-        if sender == self.original_panel.editor:
-            sender.ensurePartnerLineAlignment()
-        elif sender == self.translation_panel.editor:
-            sender.ensurePartnerLineAlignment()
+        
+        # 确定目标面板和源面板
+        if sender == self.original_panel.verticalScrollBar():
+            target_panel = self.translation_panel
+            source_panel = self.original_panel
+        else:
+            target_panel = self.original_panel
+            source_panel = self.translation_panel
+        
+        # 避免递归滚动
+        if not source_panel.syncing_scroll and not target_panel.syncing_scroll:
+            # 获取文本框标签
+            source_editor_label = None
+            target_editor_label = None
+            
+            for label in source_panel.content_widget.findChildren(QLabel, "", Qt.FindChildrenRecursively):
+                if "Content:" in label.text():
+                    source_editor_label = label
+                    break
+            
+            for label in target_panel.content_widget.findChildren(QLabel, "", Qt.FindChildrenRecursively):
+                if "Content:" in label.text():
+                    target_editor_label = label
+                    break
+            
+            if source_editor_label and target_editor_label:
+                # 获取文本框标签在面板中的位置
+                source_pos = source_editor_label.mapTo(source_panel.content_widget, QPoint(0, 0)).y()
+                target_pos = target_editor_label.mapTo(target_panel.content_widget, QPoint(0, 0)).y()
+                
+                # 获取面板当前滚动位置
+                source_scroll = source_panel.verticalScrollBar().value()
+                
+                # 判断文本框是否已滚动到面板顶部
+                # 如果标签位置小于滚动位置，说明标签已滚动到面板上方或顶部
+                source_reached_top = source_pos <= source_scroll + 10  # 添加少量容差
+                
+                # 设置目标面板滚动位置
+                target_panel.syncing_scroll = True
+                
+                if not source_reached_top:
+                    # 阶段1: 文本框未到达面板顶部，保持相同偏移量
+                    # 计算源面板中文本框距离顶部的偏移量
+                    source_offset = source_scroll
+                    # 将同样的偏移量应用到目标面板
+                    target_panel.verticalScrollBar().setValue(source_offset)
+                else:
+                    # 阶段2: 文本框已到达面板顶部，使用比例滚动
+                    # 计算超出文本框顶部的部分，即滚动值减去文本框位置
+                    source_overflow = source_scroll - source_pos
+                    
+                    # 计算源面板的剩余可滚动范围
+                    source_max = source_panel.verticalScrollBar().maximum()
+                    source_remaining = source_max - source_pos
+                    
+                    if source_remaining <= 0:
+                        ratio = 1
+                    else:
+                        ratio = source_overflow / source_remaining
+                    
+                    # 计算目标面板的可滚动范围
+                    target_max = target_panel.verticalScrollBar().maximum()
+                    target_remaining = target_max - target_pos
+                    
+                    # 计算目标面板应该滚动的值
+                    target_scroll = target_pos + (ratio * target_remaining)
+                    target_panel.verticalScrollBar().setValue(int(target_scroll))
+                
+                # 延迟重置标志
+                QTimer.singleShot(10, lambda: setattr(target_panel, 'syncing_scroll', False))
+            else:
+                # 回退到默认的比例滚动
+                source_max = source_panel.verticalScrollBar().maximum()
+                if source_max == 0:
+                    ratio = 0
+                else:
+                    ratio = value / source_max
+                
+                target_panel.syncing_scroll = True
+                target_max = target_panel.verticalScrollBar().maximum()
+                target_panel.verticalScrollBar().setValue(int(ratio * target_max))
+                QTimer.singleShot(10, lambda: setattr(target_panel, 'syncing_scroll', False))
     
     def set_title(self, title):
         """设置翻译单元标题"""
@@ -318,20 +389,74 @@ class TranslationUnit(QWidget):
     
     def set_content(self, original_text, translation_text=""):
         """设置原文和译文内容"""
-        # 暂时断开信号连接，避免触发不必要的同步
-        self.original_panel.editor.contentChanged.disconnect(self.synchronize_lines)
-        self.translation_panel.editor.contentChanged.disconnect(self.synchronize_lines)
-        
         # 设置内容
         self.original_panel.editor.setPlainText(original_text)
         self.translation_panel.editor.setPlainText(translation_text)
         
-        # 重新连接信号
-        self.original_panel.editor.contentChanged.connect(self.synchronize_lines)
-        self.translation_panel.editor.contentChanged.connect(self.synchronize_lines)
+        # 重置行数统计
+        self.original_panel.editor.last_display_line_count = 0
+        self.translation_panel.editor.last_display_line_count = 0
         
-        # 执行一次同步
-        QTimer.singleShot(100, self.synchronize_lines)
+        # 确保内容变化后重新计算行数和高度
+        QTimer.singleShot(100, self.original_panel.editor.checkLineCountChange)
+        QTimer.singleShot(100, self.translation_panel.editor.checkLineCountChange)
+        
+        # 确保文本框在面板中的位置对齐
+        QTimer.singleShot(200, self.ensure_editor_alignment)
+        
+        # 确保文本框完全扩展以显示所有内容
+        QTimer.singleShot(300, self.ensure_editors_fully_expanded)
+    
+    def ensure_editors_fully_expanded(self):
+        """确保两个编辑器都完全展开以显示所有内容"""
+        # 强制重新计算编辑器高度
+        self.original_panel.editor.checkLineCountChange()
+        self.translation_panel.editor.checkLineCountChange()
+        
+        # 更新布局
+        self.original_panel.content_widget.updateGeometry()
+        self.translation_panel.content_widget.updateGeometry()
+    
+    def ensure_editor_alignment(self):
+        """确保两个面板中的文本框位置对齐"""
+        # 获取原文面板中文本框的位置
+        original_editor_label = self.original_panel.content_widget.findChild(QLabel, "", Qt.FindChildrenRecursively)
+        for label in self.original_panel.content_widget.findChildren(QLabel, "", Qt.FindChildrenRecursively):
+            if label.text() == "Original Content:":
+                original_editor_label = label
+                break
+        
+        # 获取译文面板中文本框的位置
+        translation_editor_label = None
+        for label in self.translation_panel.content_widget.findChildren(QLabel, "", Qt.FindChildrenRecursively):
+            if label.text() == "Translation Content:":
+                translation_editor_label = label
+                break
+        
+        if original_editor_label and translation_editor_label:
+            # 计算原文面板中文本框的垂直位置
+            original_pos = original_editor_label.mapTo(self.original_panel.content_widget, QPoint(0, 0)).y()
+            
+            # 计算译文面板中文本框的垂直位置
+            translation_pos = translation_editor_label.mapTo(self.translation_panel.content_widget, QPoint(0, 0)).y()
+            
+            # 如果位置不同，调整空白区域的高度
+            if original_pos != translation_pos:
+                diff = original_pos - translation_pos
+                
+                # 找到译文面板中的所有占位空间
+                spacers = []
+                for i in range(self.translation_panel.layout.count()):
+                    widget = self.translation_panel.layout.itemAt(i).widget()
+                    if isinstance(widget, QWidget) and not isinstance(widget, QLabel) and not isinstance(widget, SyncedTextEdit) and not isinstance(widget, QPushButton):
+                        spacers.append(widget)
+                
+                # 调整最后一个占位空间的高度
+                if spacers and diff != 0:
+                    last_spacer = spacers[-1]
+                    new_height = last_spacer.height() + diff
+                    if new_height > 0:
+                        last_spacer.setFixedHeight(new_height)
 
 
 # 测试代码

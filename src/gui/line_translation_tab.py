@@ -6,7 +6,7 @@ import random
 import re
 from .tab_interface import TabInterface
 from .components.nav_bar import NavigationBar
-from .styles.style_manager import get_translation_button_stylesheet  # Import the style
+from .styles.style_manager import get_translation_button_stylesheet, get_scrollbar_stylesheet  # Import the style
 
 # 导入翻译单元相关组件
 try:
@@ -19,6 +19,8 @@ except ImportError:
     from .components.translation_units_container import TranslationWorkspacePanel
     from .components.translation_status_strip import TranslationStatusStrip
 
+# 添加样式导入
+from src.gui.styles.style_manager import get_scrollbar_stylesheet
 class LineTranslationTab(TabInterface):
     def __init__(self):
         super().__init__("Line Translation")
@@ -33,6 +35,14 @@ class LineTranslationTab(TabInterface):
         # 主内容面板
         self.main_panel = LineTranslationPanel(self.scroll_area)
         self.scroll_area.setWidget(self.main_panel)
+        
+        # 应用美化的滚动条样式
+        self.scroll_area.setStyleSheet("""
+            QScrollArea {
+                background-color: #f8f8f8;
+                border: none;
+            }
+        """ + get_scrollbar_stylesheet())
         
         # 设置Tab布局
         layout = QVBoxLayout()

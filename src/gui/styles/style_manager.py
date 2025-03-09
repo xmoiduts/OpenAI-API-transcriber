@@ -244,15 +244,67 @@ def get_translation_button_stylesheet():
         }
     """
 
+def get_scrollbar_stylesheet():
+    """
+    获取美化的滚动条样式表
+    """
+    return """
+        QScrollBar:vertical {
+            background-color: #f0f0f0;
+            width: 12px;
+            margin: 0px;
+        }
+        QScrollBar::handle:vertical {
+            background-color: #c0c0c0;
+            min-height: 20px;
+            border-radius: 6px;
+            margin: 2px;
+        }
+        QScrollBar::handle:vertical:hover {
+            background-color: #a0a0a0;
+        }
+        QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {
+            height: 0px;
+            background: none;
+        }
+        QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical {
+            background: none;
+        }
+        QScrollBar:horizontal {
+            background-color: #f0f0f0;
+            height: 12px;
+            margin: 0px;
+        }
+        QScrollBar::handle:horizontal {
+            background-color: #c0c0c0;
+            min-width: 20px;
+            border-radius: 6px;
+            margin: 2px;
+        }
+        QScrollBar::handle:horizontal:hover {
+            background-color: #a0a0a0;
+        }
+        QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal {
+            width: 0px;
+            background: none;
+        }
+        QScrollBar::add-page:horizontal, QScrollBar::sub-page:horizontal {
+            background: none;
+        }
+    """
+
 def get_complete_stylesheet():
-    """Combines all stylesheets"""
-    return "\n".join([
-        get_base_stylesheet(),
-        get_button_stylesheet(),
-        get_menu_stylesheet(),
-        get_input_stylesheet(),
-        get_segment_bar_stylesheet(),
-        get_dropdown_stylesheet(),
-        get_time_slicer_stylesheet(),
-        get_translation_button_stylesheet()
-    ])
+    """
+    获取完整样式表
+    """
+    return (
+        get_base_stylesheet() +
+        get_menu_stylesheet() +
+        get_time_slicer_stylesheet() +
+        get_button_stylesheet() +
+        get_input_stylesheet() +
+        get_segment_bar_stylesheet() +
+        get_dropdown_stylesheet() +
+        get_translation_button_stylesheet() +
+        get_scrollbar_stylesheet()  # 添加滚动条样式
+    )
