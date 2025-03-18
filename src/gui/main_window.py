@@ -3,7 +3,7 @@ from .time_slicer_tab import TimeSlicerTab
 from .transcription_tab import TranscriptionTab
 from .transcription_new_tab import TranscriptionNewTab
 from .line_translation_tab import LineTranslationTab
-from .styles.style_manager import get_complete_stylesheet
+from .styles.style_manager import get_main_window_stylesheet
 
 
 class MainWindow(QMainWindow):
@@ -25,7 +25,7 @@ class MainWindow(QMainWindow):
         self.tab_widget.addTab(self.transcription_new_tab, "Transcription New")
         self.tab_widget.addTab(self.line_translation_tab, "Line Translation")
 
-        self.setStyleSheet(get_complete_stylesheet())
+        self.setStyleSheet(get_main_window_stylesheet())
 
     def update_transcription_tab(self, file_path, duration, slices):
         self.transcription_tab.update_from_other_tab(

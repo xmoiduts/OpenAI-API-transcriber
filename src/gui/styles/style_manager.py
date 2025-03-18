@@ -293,9 +293,83 @@ def get_scrollbar_stylesheet():
         }
     """
 
+def get_drop_zone_stylesheet():
+    """
+    获取文件拖放区域的样式表
+    """
+    return """
+        /* 只针对有dropZone属性的Label应用拖放样式 */
+        QLabel[dropZone="true"] {
+            background-color: #f0f0f0;
+            border: 2px dashed #ccc;
+            border-radius: 5px;
+            padding: 20px;
+            font-size: 14px;
+            transition: all 0.3s;
+        }
+        /* 只针对有dropZone和dragOver属性的Label应用拖拽时的样式 */
+        QLabel[dropZone="true"][dragOver="true"] {
+            background-color: #e6f7ff;
+            border: 2px dashed #1890ff;
+            color: #1890ff;
+        }
+    """
+
+def get_main_window_stylesheet():
+    """
+    获取主窗口样式表组合
+    """
+    return (
+        get_base_stylesheet() +
+        get_menu_stylesheet() +
+        get_button_stylesheet() +
+        get_input_stylesheet() +
+        get_dropdown_stylesheet()
+    )
+
+def get_segment_bar_combined_stylesheet():
+    """
+    获取分段条专用样式表组合
+    """
+    return (
+        get_base_stylesheet() +
+        get_menu_stylesheet() +
+        get_segment_bar_stylesheet() +
+        get_button_stylesheet() +
+        get_input_stylesheet()
+    )
+
+def get_time_slicer_combined_stylesheet():
+    """
+    获取时间切片器专用样式表组合
+    """
+    return (
+        get_base_stylesheet() +
+        get_menu_stylesheet() +
+        get_time_slicer_stylesheet() +
+        get_button_stylesheet() +
+        get_input_stylesheet() +
+        get_scrollbar_stylesheet()
+    )
+
+def get_line_translation_combined_stylesheet():
+    """
+    获取行翻译专用样式表组合
+    """
+    return (
+        get_base_stylesheet() +
+        get_menu_stylesheet() +
+        get_button_stylesheet() +
+        get_input_stylesheet() +
+        get_translation_button_stylesheet() +
+        get_scrollbar_stylesheet() +
+        get_drop_zone_stylesheet()
+    )
+
 def get_complete_stylesheet():
     """
-    获取完整样式表
+    获取完整的应用样式表
+    注意: 尽量避免直接使用此函数，推荐使用针对特定组件的样式表函数
     """
     return (
         get_base_stylesheet() +
@@ -306,5 +380,6 @@ def get_complete_stylesheet():
         get_segment_bar_stylesheet() +
         get_dropdown_stylesheet() +
         get_translation_button_stylesheet() +
-        get_scrollbar_stylesheet()  # 添加滚动条样式
+        get_scrollbar_stylesheet()
+        # 不再默认包含 drop_zone_stylesheet，避免样式污染
     )

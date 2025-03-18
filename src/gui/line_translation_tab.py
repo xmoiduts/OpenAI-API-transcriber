@@ -1,12 +1,12 @@
 from PyQt5.QtWidgets import (QWidget, QScrollArea, QHBoxLayout, QVBoxLayout,
                             QFrame, QLabel, QSizePolicy, QApplication,
                             QPushButton, QFileDialog)
-from PyQt5.QtCore import Qt, QPoint, QSize, QTimer
+from PyQt5.QtCore import Qt, QPoint, QSize, QTimer, pyqtSignal
 import random
 import re
 from .tab_interface import TabInterface
 from .components.nav_bar import NavigationBar
-from .styles.style_manager import get_translation_button_stylesheet, get_scrollbar_stylesheet  # Import the style
+from .styles.style_manager import get_translation_button_stylesheet, get_scrollbar_stylesheet, get_drop_zone_stylesheet, get_line_translation_combined_stylesheet  # Import the style
 
 # 导入翻译单元相关组件
 try:
@@ -36,13 +36,8 @@ class LineTranslationTab(TabInterface):
         self.main_panel = LineTranslationPanel(self.scroll_area)
         self.scroll_area.setWidget(self.main_panel)
         
-        # 应用美化的滚动条样式
-        self.scroll_area.setStyleSheet("""
-            QScrollArea {
-                background-color: #f8f8f8;
-                border: none;
-            }
-        """ + get_scrollbar_stylesheet())
+        # 应用美化的滚动条样式和组合样式
+        self.setStyleSheet(get_line_translation_combined_stylesheet())
         
         # 设置Tab布局
         layout = QVBoxLayout()
@@ -57,9 +52,9 @@ class LineTranslationTab(TabInterface):
             
     def update_from_other_tab(self, data):
         """从其他标签页接收数据"""
-        # 这里可以处理来自其他标签页的数据，如接收transcription结果
-        if 'lines' in data:
-            self.main_panel.load_lines(data['lines'])
+        # 将接收到的数据传递给主面板
+        if hasattr(self, 'main_panel'):
+            self.main_panel.update_from_other_tab(data)
 
 class LineTranslationPanel(QWidget):
     def __init__(self, scroll_area):
@@ -76,9 +71,10 @@ class LineTranslationPanel(QWidget):
         self.main_layout.setSpacing(0)
 
         # 源面板（固定宽度）
-        self.source_panel = SourcePanel()
+        self.source_panel = SourcePanel(self)
         self.source_panel.setFixedWidth(self.source_width)
-        self.source_panel.load_to_workspace_btn.clicked.connect(self.load_dummy_data)
+        # 连接内容加载信号
+        self.source_panel.contentLoaded.connect(self.load_lines)
         self.main_layout.addWidget(self.source_panel)
 
         # 状态条（固定宽度）
@@ -125,83 +121,16 @@ class LineTranslationPanel(QWidget):
         self.setFixedWidth(total_width)
         #self.scroll_area.setMinimumWidth(self.scroll_area.viewport().width())
         
-    def load_dummy_data(self):
-        """加载示例数据到工作区"""
-        self.create_sample_units(3)
-        # 延迟1秒模拟翻译
-        QTimer.singleShot(1000, self.simulate_translation)
+    def handle_file_open(self):
+        """处理打开文件的回调 - 此方法现在已不再需要"""
+        # 此方法已被废弃，保留在这里备忘
+        pass
         
-    def create_sample_units(self, count=3):
-        """创建示例翻译单元"""
-        # 清空现有单元
-        self.workspace_panel.translation_units_panel.units_container.clear()
-        
-        for i in range(count):
-            start_line = i * 100 + 1
-            end_line = start_line + 99
-            unit_id = f"L{start_line}-L{end_line}"
-            
-            # 生成示例内容
-            original_lines = []
-            for j in range(start_line, end_line + 1):
-                original_lines.append(f"{{L{j}}} This is line {j} of the original content.")
-            
-            original_text = "\n".join(original_lines)
-            translation_text = ""
-            
-            self.workspace_panel.translation_units_panel.add_unit(unit_id, original_text, translation_text)
-            
-        # 更新总宽度
-        self.update_total_width()
-        
-    def simulate_translation(self):
-        """模拟翻译过程"""
-        # 获取所有单元
-        units = self.workspace_panel.translation_units_panel.units_container.units
-        if not units:
-            return
-        
-        # 获取当前状态条状态
-        statuses = self.status_strip.line_statuses
-        
-        # 模拟翻译第一个单元
-        unit = units[0]
-        original_text = unit.original_panel.editor.toPlainText()
-        lines = original_text.split('\n')
-        
-        # 生成翻译结果
-        translation_lines = []
-        for i, line in enumerate(lines):
-            # 从原文中提取行号
-            match = re.match(r'{L(\d+)}', line)
-            if match:
-                line_num = int(match.group(1))
-                # 更新状态条
-                if 0 <= line_num - 1 < len(statuses):
-                    # 90%的概率翻译成功，10%失败
-                    if random.random() < 0.9:
-                        statuses[line_num - 1] = 'translated'
-                        status = 'translated'
-                    else:
-                        statuses[line_num - 1] = 'failed'
-                        status = 'failed'
-                    
-                    # 根据状态生成不同的翻译
-                    if status == 'translated':
-                        # 模拟中文翻译
-                        translation = f"{{L{line_num}}} 这是原始内容的第 {line_num} 行。"
-                    else:
-                        # 翻译失败
-                        translation = f"{{L{line_num}}} [翻译失败] 原文: {line}"
-                    
-                    translation_lines.append(translation)
-        
-        # 更新翻译结果
-        translation_text = "\n".join(translation_lines)
-        unit.translation_panel.editor.setPlainText(translation_text)
-        
-        # 更新状态条
-        self.status_strip.update_line_statuses(statuses)
+    def update_from_other_tab(self, data):
+        """从其他标签页接收数据，如transcription结果"""
+        if "lines" in data and data["lines"]:
+            tab_name = data.get("tab_name", "Unknown Tab")
+            self.source_panel.set_context_content(tab_name, data["lines"])
         
     def load_lines(self, lines):
         """从外部加载行文本"""
@@ -244,12 +173,29 @@ class LineTranslationPanel(QWidget):
         # 确保滚动到开始位置
         QTimer.singleShot(100, lambda: self.scroll_area.horizontalScrollBar().setValue(0))
 
+    def load_from_context(self):
+        """从上下文加载内容 (示例功能)"""
+        # 这是面板级别的示例实现，调用SourcePanel的方法
+        if hasattr(self, 'source_panel'):
+            self.source_panel.load_from_context()
+
 class SourcePanel(QFrame):
     """左侧源文件面板"""
+    
+    # 定义信号，用于通知文件内容已加载到工作区
+    contentLoaded = pyqtSignal(list)
+    
     def __init__(self, parent=None):
         super().__init__(parent)
+        # 保存当前加载的内容
+        self.current_content_lines = []
+        self.current_file_path = ""
+        self.content_source = "none"  # 'file', 'context', 或 'none'
+        
         self.init_ui()
-    
+        # 设置接受文件拖放
+        self.setAcceptDrops(True)
+        
     def init_ui(self):
         layout = QVBoxLayout(self)
         
@@ -257,17 +203,10 @@ class SourcePanel(QFrame):
         self.setStyleSheet(get_translation_button_stylesheet())  # Apply the translation button styles
         
         # 拖放区域
-        self.drop_zone = QLabel("Drop files here")
+        self.drop_zone = QLabel("Drag a text file here to load")
         self.drop_zone.setAlignment(Qt.AlignCenter)
-        self.drop_zone.setStyleSheet("""
-            QLabel {
-                background-color: #f0f0f0;
-                border: 2px dashed #ccc;
-                border-radius: 5px;
-                padding: 20px;
-                font-size: 14px;
-            }
-        """)
+        self.drop_zone.setProperty("dropZone", True)  # 设置属性以便CSS选择器识别
+        self.drop_zone.setStyleSheet(get_drop_zone_stylesheet())
         self.drop_zone.setMinimumHeight(100)
         layout.addWidget(self.drop_zone)
         
@@ -286,18 +225,13 @@ class SourcePanel(QFrame):
         # 从上下文加载按钮
         self.load_context_btn = QPushButton("Load from context")
         self.load_context_btn.setObjectName("load_context_btn")  # Set object name for styling
+        self.load_context_btn.clicked.connect(self.load_from_context)
         layout.addWidget(self.load_context_btn)
         
         # 上下文名称
         self.context_name = QLabel("<context name>")
         self.context_name.setStyleSheet("text-decoration: underline;")
         layout.addWidget(self.context_name)
-        
-        # 加载到工作区按钮
-        self.load_to_workspace_btn = QPushButton("→")
-        self.load_to_workspace_btn.setObjectName("load_to_workspace_btn")  # Set object name for styling
-        self.load_to_workspace_btn.setToolTip("Load to workspace")
-        layout.addWidget(self.load_to_workspace_btn)
         
         # 元信息文本框
         layout.addWidget(QLabel("Meta Information:"))
@@ -314,10 +248,17 @@ class SourcePanel(QFrame):
         self.meta_info.setMinimumHeight(100)
         layout.addWidget(self.meta_info)
         
+        # 加载到工作区按钮 (移到元信息框下方)
+        self.load_to_workspace_btn = QPushButton("→")
+        self.load_to_workspace_btn.setObjectName("load_to_workspace_btn")  # Set object name for styling
+        self.load_to_workspace_btn.setToolTip("Load to workspace")
+        self.load_to_workspace_btn.clicked.connect(self.load_content_to_workspace)
+        self.load_to_workspace_btn.setEnabled(False)  # 初始禁用，直到有内容可加载
+        layout.addWidget(self.load_to_workspace_btn)
+        
         # 添加弹性空间
         layout.addStretch()
         
-    
     def open_file_dialog(self):
         """打开文件对话框"""
         file_path, _ = QFileDialog.getOpenFileName(
@@ -325,13 +266,103 @@ class SourcePanel(QFrame):
         )
         
         if file_path:
-            self.update_meta_info(file_path)
+            self.load_from_file(file_path)
     
-    def update_meta_info(self, file_path):
+    def load_from_file(self, file_path):
+        """从文件加载内容"""
+        try:
+            with open(file_path, 'r', encoding='utf-8') as f:
+                lines = f.readlines()
+                
+            # 保存当前内容和来源信息
+            self.current_content_lines = lines
+            self.current_file_path = file_path
+            self.content_source = "file"
+            
+            # 更新元信息显示
+            self.update_meta_info()
+            
+            # 启用加载按钮
+            self.load_to_workspace_btn.setEnabled(True)
+                
+        except Exception as e:
+            self.meta_info.setText(f"加载文件失败: {str(e)}")
+            self.load_to_workspace_btn.setEnabled(False)
+    
+    def load_from_context(self):
+        """从上下文加载内容 (示例)"""
+        # 这只是一个示例实现，实际应用中需要与主窗口交互获取上下文
+        sample_lines = [
+            "这是从上下文加载的第一行示例文本",
+            "这是从上下文加载的第二行示例文本",
+            "这是从上下文加载的第三行示例文本",
+        ]
+        self.set_context_content("示例上下文", sample_lines)
+    
+    def set_context_content(self, name, lines):
+        """设置从上下文接收的内容"""
+        if lines:
+            # 保存当前内容和来源信息
+            self.current_content_lines = lines
+            self.current_file_path = ""
+            self.content_source = "context"
+            self.context_name.setText(name)
+            
+            # 更新元信息显示
+            self.update_meta_info()
+            
+            # 启用加载按钮
+            self.load_to_workspace_btn.setEnabled(True)
+    
+    def update_meta_info(self):
         """更新元信息显示"""
-        # 这里只是示例，实际应该读取文件内容并分析
-        self.meta_info.setText(f"文件名: {file_path.split('/')[-1]}\n行数: 300")
-
+        line_count = len(self.current_content_lines)
+        
+        if self.content_source == "file":
+            filename = self.current_file_path.split('/')[-1]
+            self.meta_info.setText(f"文件名: {filename}\n行数: {line_count}")
+        elif self.content_source == "context":
+            self.meta_info.setText(f"上下文来源: {self.context_name.text()}\n行数: {line_count}")
+        else:
+            self.meta_info.setText("No content loaded")
+    
+    def load_content_to_workspace(self):
+        """加载当前内容到工作区"""
+        if self.current_content_lines:
+            # 发出信号，通知内容已准备好加载
+            self.contentLoaded.emit(self.current_content_lines)
+    
+    # 拖放事件处理 #
+    def dragEnterEvent(self, event):
+        if event.mimeData().hasUrls():
+            self.drop_zone.setProperty("dropZone", True)
+            self.drop_zone.setProperty("dragOver", True)
+            self.drop_zone.style().unpolish(self.drop_zone)
+            self.drop_zone.style().polish(self.drop_zone)
+            self.drop_zone.setText("Drop to load file")
+            event.accept()
+        else:
+            event.ignore()
+            
+    def dragLeaveEvent(self, event):
+        self.drop_zone.setProperty("dropZone", True)
+        self.drop_zone.setProperty("dragOver", False)
+        self.drop_zone.style().unpolish(self.drop_zone)
+        self.drop_zone.style().polish(self.drop_zone)
+        self.drop_zone.setText("Drag a text file here to load")
+        super().dragLeaveEvent(event)
+        
+    def dropEvent(self, event):
+        self.drop_zone.setProperty("dropZone", True)
+        self.drop_zone.setProperty("dragOver", False)
+        self.drop_zone.style().unpolish(self.drop_zone)
+        self.drop_zone.style().polish(self.drop_zone)
+        files = [u.toLocalFile() for u in event.mimeData().urls()]
+        if files:
+            file_path = files[0]
+            self.load_from_file(file_path)
+            self.drop_zone.setText("File loaded successfully!")
+    # 拖放事件处理结束 #
 
 class WorkspacePanel(QWidget):
     def __init__(self, parent):

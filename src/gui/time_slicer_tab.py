@@ -14,7 +14,7 @@ import subprocess
 from PyQt5 import sip
 from .flying_message import show_flying_message
 from .util.add_zero_wide_char_to_str import add_zero_wide_char_to_str
-from .styles.style_manager import get_complete_stylesheet
+from .styles.style_manager import get_time_slicer_combined_stylesheet
 
 # def get_stylesheet():
 #     return """
@@ -201,7 +201,7 @@ class TimeSlicerTab(TabInterface):
         self.current_flying_label = None
 
         self.init_ui()
-        self.setStyleSheet(get_complete_stylesheet())
+        self.setStyleSheet(get_time_slicer_combined_stylesheet())
 
     def init_ui(self):
         layout = QVBoxLayout()

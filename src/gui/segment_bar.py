@@ -4,14 +4,14 @@ from PyQt5.QtWidgets import (QFrame, QToolTip, QMenu, QWidgetAction,
 from PyQt5.QtCore import Qt, QRectF, QEvent
 from PyQt5.QtGui import QPainter, QPen, QColor, QFont
 from .draggable_label import DraggableLabel
-from .styles.style_manager import get_complete_stylesheet
+from .styles.style_manager import get_segment_bar_combined_stylesheet
 
 class SegmentBar(QFrame):
     def __init__(self, parent=None, mode="time_slicer"):
         super().__init__(parent)
         self.setFixedHeight(30)
         self.setObjectName("segment_bar")  # Add object name for styling
-        self.setStyleSheet(get_complete_stylesheet())
+        self.setStyleSheet(get_segment_bar_combined_stylesheet())
         self.segments = [] # list of (start: int?, duration: int?)
         self.setMouseTracking(True)
         self.hovered_segment = -1
@@ -301,7 +301,7 @@ class SegmentBar(QFrame):
             return
             
         menu = QMenu(self)
-        menu.setStyleSheet(get_complete_stylesheet())
+        menu.setStyleSheet(get_segment_bar_combined_stylesheet())
         
         # Add placeholder items
         menu.addAction("Placeholder 1")
