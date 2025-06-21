@@ -139,6 +139,20 @@ def get_button_stylesheet():
             background-color: #a0a0a0;
             color: #d0d0d0;
         }
+        QPushButton#settings_button {
+            background-color: #607D8B;
+            color: white;
+            border-radius: 4px;
+            font-size: 16px;
+            padding: 0px;
+        }
+        QPushButton#settings_button:hover {
+            background-color: #546E7A;
+        }
+        QPushButton#settings_button:disabled {
+            background-color: #a0a0a0;
+            color: #d0d0d0;
+        }
     """
 
 

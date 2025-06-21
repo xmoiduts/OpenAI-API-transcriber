@@ -52,7 +52,8 @@ FILE_NAME_CORE="${input_filename%.*}" # file name without extension name
 #  and size < 25MB
 # else: extract stream, -s and -t is a must
 set -x
-AUDIO_FILE_PATH="${TMP_DIR}/${FILE_NAME_CORE}_cut.m4a" #m4a
+# Use consistent naming pattern with Python implementation: {file_stem}_ss{display_start}-t{duration}_cut.{format}
+AUDIO_FILE_PATH="${TMP_DIR}/${FILE_NAME_CORE}_ss${start_time}-t${duration}_cut.m4a"
 ffmpeg -i "${input_file_fullpath}" -y -ss $start_time -t $duration -vn "$AUDIO_FILE_PATH"
 if [ $? -ne 0 ]; then
     echo "Failed to cut audio file. Exiting."
@@ -63,7 +64,8 @@ fi
 # 使用basename获取文件名（排除扩展名）
 filename="$(basename "${AUDIO_FILE_PATH%.*}")"
 mkdir -p "transcription_result/${FILE_NAME_CORE}"
-RESPONSE_FILE="transcription_result/${FILE_NAME_CORE}/${filename}_ss${start_time}-t${duration}.json"
+# Use consistent naming pattern: {temp_file_stem}_result.json
+RESPONSE_FILE="transcription_result/${FILE_NAME_CORE}/${filename}_result.json"
 
 set +x
 

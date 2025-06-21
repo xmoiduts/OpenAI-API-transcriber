@@ -106,7 +106,13 @@ class WhisperTranscriber:
             input_path = Path(input_file).resolve()
             file_stem = input_path.stem
             output_format = self._get_output_format(input_path)
-            audio_segment = self.tmp_dir / f"{file_stem}_cut.{output_format}"
+            
+            # Generate unique temporary filename to avoid concurrent conflicts
+            # Format: {file_stem}_ss{display_start}-t{duration}_cut.{format}
+            # This matches the result JSON file naming pattern for consistency
+            audio_segment = self.tmp_dir / f"{file_stem}_ss{display_start}-t{duration}_cut.{output_format}"
+            
+            self._log(log_callback, f"Using temporary audio file: {audio_segment}")
             
             # Cut audio segment using ffmpeg
             self._log(log_callback, "Cutting audio segment...")
@@ -119,8 +125,8 @@ class WhisperTranscriber:
             result_dir = self.result_dir / file_stem
             result_dir.mkdir(exist_ok=True)
             result_file = result_dir / \
-                f"{audio_segment.stem}_ss{display_start}-t{duration}.json"
-            self._log(log_callback, f"...{result_file}")
+                f"{audio_segment.stem}_result.json"
+            self._log(log_callback, f"Will save result to: {result_file}")
 
             # Call Whisper API
             self._log(log_callback, "Calling Whisper API...")

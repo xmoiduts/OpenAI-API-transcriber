@@ -5,6 +5,7 @@ from PyQt5.QtCore import Qt, QRectF, QEvent
 from PyQt5.QtGui import QPainter, QPen, QColor, QFont
 from .draggable_label import DraggableLabel
 from .styles.style_manager import get_segment_bar_combined_stylesheet
+from .slice_manager import SliceManager, SliceStatus
 
 class SegmentBar(QFrame):
     def __init__(self, parent=None, mode="time_slicer"):
@@ -18,6 +19,14 @@ class SegmentBar(QFrame):
         self.mode = mode
         self.segment_status = {}  # For transcription status
         self.segment_start_offsets = []  # List of time offsets (int) in seconds
+        
+        # New slice manager
+        self.slice_manager = SliceManager()
+        self.slice_manager.slice_status_changed.connect(self.on_slice_status_changed)
+        self.slice_manager.slices_updated.connect(self.update)
+        
+        # For marking slices during hover/transcription
+        self.marked_slices = set()  # Set of slice indices to mark with thick border
 
     # def get_hms_editor_stylesheet(self):
     #     return """
@@ -85,10 +94,52 @@ class SegmentBar(QFrame):
     def set_segments(self, segments):
         self.segments = segments
         self.segment_start_offsets = [start for (start, duration) in segments]
+        
+        # Update slice manager
+        if segments:
+            self.slice_manager.set_slices(segments, self.segment_start_offsets)
+        else:
+            self.slice_manager.clear()
+            
         self.update()
 
     def set_segment_status(self, segment_status):
         self.segment_status = segment_status
+        # Also update slice manager statuses for compatibility
+        if hasattr(self, 'slice_manager'):
+            for index, status in segment_status.items():
+                # Map old status names to new enum values
+                status_map = {
+                    "pending": SliceStatus.IDLE,
+                    "in_progress": SliceStatus.TRANSCRIBING,
+                    "completed": SliceStatus.DONE,
+                    "error": SliceStatus.FAILURE
+                }
+                new_status = status_map.get(status, SliceStatus.IDLE)
+                self.slice_manager.set_slice_status(index, new_status)
+        self.update()
+    
+    def on_slice_status_changed(self, slice_index, status_value):
+        """Handle slice status changes from SliceManager"""
+        # Update legacy segment_status for compatibility
+        status_map = {
+            SliceStatus.IDLE.value: "pending",
+            SliceStatus.SELECTED.value: "pending",  # Selected slices show as pending in old system
+            SliceStatus.TRANSCRIBING.value: "in_progress",
+            SliceStatus.DONE.value: "completed",
+            SliceStatus.FAILURE.value: "error"
+        }
+        self.segment_status[slice_index] = status_map.get(status_value, "pending")
+        self.update()
+    
+    def set_marked_slices(self, slice_indices):
+        """Set which slices should be marked with thick border"""
+        self.marked_slices = set(slice_indices)
+        self.update()
+    
+    def clear_marked_slices(self):
+        """Clear all slice markings"""
+        self.marked_slices.clear()
         self.update()
 
     def seconds_to_hms(self, seconds):
@@ -161,8 +212,13 @@ class SegmentBar(QFrame):
             if self.mode == "time_slicer":
                 painter.setBrush(QColor("#FFA500"))
             elif self.mode == "transcription":
-                status = self.segment_status.get(i, "pending")
-                color = self.get_status_color(status)
+                # Use slice manager status if available, otherwise fall back to legacy
+                if hasattr(self, 'slice_manager') and i < self.slice_manager.get_slice_count():
+                    slice_status = self.slice_manager.get_slice_status(i)
+                    color = self.get_slice_status_color(slice_status)
+                else:
+                    status = self.segment_status.get(i, "pending")
+                    color = self.get_status_color(status)
                 painter.setBrush(QColor(color))
 
             painter.drawRoundedRect(segment_rect, 5, 5)
@@ -183,12 +239,33 @@ class SegmentBar(QFrame):
                 painter.drawLine(cross_rect.topLeft(), cross_rect.bottomRight())
                 painter.drawLine(cross_rect.topRight(), cross_rect.bottomLeft())
 
+            # Draw thick border for marked slices
+            if i in self.marked_slices:
+                painter.setPen(QPen(QColor("#66CCFF"), 3))
+                painter.setBrush(Qt.NoBrush)
+                painter.drawRoundedRect(segment_rect, 5, 5)
+
+            # Draw hover effect
             if i == self.hovered_segment:
                 painter.setPen(QPen(QColor("#FF4500"), 1))
                 painter.setBrush(Qt.NoBrush)
                 painter.drawRoundedRect(segment_rect, 5, 5)
 
             x_prev = x
+
+    def get_slice_status_color(self, slice_status):
+        """Get color for slice status using new SliceStatus enum"""
+        if slice_status is None:
+            return "#FFFFFF"
+            
+        colors = {
+            SliceStatus.IDLE: "#FFFFFF",      # White
+            SliceStatus.SELECTED: "#E3E3E3",  # Light Gray
+            SliceStatus.TRANSCRIBING: "#4169E1",  # Royal Blue
+            SliceStatus.DONE: "#32CD32",      # Lime Green
+            SliceStatus.FAILURE: "#FF0000"    # Red
+        }
+        return colors.get(slice_status, "#FFFFFF")
 
     def get_status_color(self, status):
         colors = {
@@ -279,7 +356,7 @@ class SegmentBar(QFrame):
     def contextMenuEvent(self, event):
         # Right-Click menu, allowing users to:
         #   Manually edit transcription start time for one segment
-        #   ... toggle transcribe status to skip/redo transcription? ...
+        #   Control slice status (reset to idle / select slice)
         if self.mode != "transcription":
             return
             
@@ -303,8 +380,17 @@ class SegmentBar(QFrame):
         menu = QMenu(self)
         menu.setStyleSheet(get_segment_bar_combined_stylesheet())
         
-        # Add placeholder items
-        menu.addAction("Placeholder 1")
+        # Add slice status control
+        if hasattr(self, 'slice_manager') and current_segment < self.slice_manager.get_slice_count():
+            slice_status = self.slice_manager.get_slice_status(current_segment)
+            
+            if slice_status == SliceStatus.IDLE:
+                action = menu.addAction("Select this slice")
+                action.triggered.connect(lambda: self.slice_manager.toggle_slice_selection(current_segment))
+            else:
+                action = menu.addAction("Reset to idle")
+                action.triggered.connect(lambda: self.slice_manager.reset_slice_to_idle(current_segment))
+        
         menu.addSeparator()
         
         # Create HMS editor widget
@@ -336,12 +422,6 @@ class SegmentBar(QFrame):
         for input_box in (h_input, m_input, s_input):
             input_box.setFixedWidth(40)
             input_box.setAlignment(Qt.AlignCenter)
-            # input_box.setStyleSheet("""
-            #     QLineEdit {
-            #         font-size: 14px;
-            #         font-weight: bold;
-            #     }
-            # """)
         
         h, m, s = self.get_segment_start_offset_hms(current_segment)
         h_input.setText(str(h))
@@ -398,9 +478,5 @@ class SegmentBar(QFrame):
         widget_action = QWidgetAction(menu)
         widget_action.setDefaultWidget(hms_widget)
         menu.addAction(widget_action)
-        
-        # Add more placeholder items
-        menu.addSeparator()
-        menu.addAction("Placeholder 2")
         
         menu.exec_(event.globalPos())

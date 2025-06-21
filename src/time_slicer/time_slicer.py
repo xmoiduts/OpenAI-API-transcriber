@@ -1,6 +1,6 @@
 import math
 
-PADDING = 9
+PADDING = 9 # seconds
 SLICE_DURATION_MINUTES=10
 def get_time_slices(total_duration, audio_bitrate):
     """

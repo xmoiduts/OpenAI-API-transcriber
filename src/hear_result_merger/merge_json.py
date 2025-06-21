@@ -31,10 +31,17 @@ def load_json(file_path: str) -> Dict:
 
 def parse_filename(filename: str) -> tuple:
     """Parse filename to extract start time and duration."""
-    match = re.search(r'_ss(\d+)-t(\d+)\.json$', filename)
+    # Updated to match new format: {file_stem}_ss{start}-t{duration}_cut_result.json
+    match = re.search(r'_ss(\d+)-t(\d+)_cut_result\.json$', filename)
     if match:
         return int(match.group(1)), int(match.group(2)) # start at, duration
-    raise ValueError(f"Invalid filename format: {filename}")
+    
+    # Fallback to old format for backwards compatibility
+    match_old = re.search(r'_ss(\d+)-t(\d+)\.json$', filename)
+    if match_old:
+        return int(match_old.group(1)), int(match_old.group(2))
+    
+    raise ValueError(f"Invalid filename format: {filename}. Expected format: *_ss{start}-t{duration}_cut_result.json")
 
 def extract_sort_key(filename: str) -> int:
     """Extract the start time part from the filename."""
