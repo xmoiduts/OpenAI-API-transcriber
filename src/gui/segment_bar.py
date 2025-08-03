@@ -163,11 +163,21 @@ class SegmentBar(QFrame):
     def set_segment_start_offset_hms(self, segment_index, h, m, s):
         """Set offset for a segment using HMS format"""
         if 0 <= segment_index < len(self.segment_start_offsets):
-            self.segment_start_offsets[segment_index] = self.hms_to_seconds(h, m, s)
+            new_actual_start = self.hms_to_seconds(h, m, s)
+            self.segment_start_offsets[segment_index] = new_actual_start
+            
+            # Sync with slice manager to ensure manual offset is used in transcription
+            if hasattr(self, 'slice_manager') and segment_index < self.slice_manager.get_slice_count():
+                self.slice_manager.set_slice_actual_start(segment_index, new_actual_start)
+            
             self.update()
 
     def is_valid_segment_time(self, segment_index, seconds):
-        # 检查给定的时间是否在segment的有效范围内
+        """
+        检查给定的时间是否在segment的有效范围内
+        Valid范围：当前slice的 [起始时间,结束时间) 
+        （不考虑与其他slice的重叠）
+        """
         if segment_index < 0 or segment_index >= len(self.segments):
             return False
             
@@ -176,15 +186,8 @@ class SegmentBar(QFrame):
         duration = self.segments[segment_index][1]
         end_time = start_time + duration
         
-        # 如果是第一个segment，只检查上限
-        if segment_index == 0:
-            return seconds <= end_time
-        
-        # 获取前一个segment的结束时间作为下限
-        prev_start, prev_duration = self.segments[segment_index - 1]
-        prev_end = prev_start + prev_duration
-        
-        return prev_end <= seconds <= end_time
+        # 只要在当前slice的时间范围内就是valid（包含起始，不包含结束）
+        return start_time <= seconds < end_time
 
     def paintEvent(self, event):
         super().paintEvent(event)
@@ -480,3 +483,29 @@ class SegmentBar(QFrame):
         menu.addAction(widget_action)
         
         menu.exec_(event.globalPos())
+        
+        # Post-menu validation: Check if the current offset is valid
+        # If not, show warning message and reset to no offset
+        try:
+            h = int(h_input.text() or 0)
+            m = int(m_input.text() or 0)
+            s = int(s_input.text() or 0)
+            final_seconds = self.hms_to_seconds(h, m, s)
+            
+            if not self.is_valid_segment_time(current_segment, final_seconds):
+                # Import here to avoid circular imports
+                try:
+                    from .flying_message import show_flying_message
+                    show_flying_message(self, f"Illegal time {h:02d}:{m:02d}:{s:02d} has been reset to no offset")
+                except ImportError:
+                    # Fallback if flying_message is not available
+                    print(f"Warning: Illegal time {h:02d}:{m:02d}:{s:02d} has been reset to no offset")
+                
+                # Reset to no offset (original start time)
+                start, _ = self.segments[current_segment]
+                self.set_segment_start_offset_hms(current_segment, *self.seconds_to_hms(start))
+                
+        except ValueError:
+            # If there are invalid values in inputs, also reset
+            start, _ = self.segments[current_segment]
+            self.set_segment_start_offset_hms(current_segment, *self.seconds_to_hms(start))

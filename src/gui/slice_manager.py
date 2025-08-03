@@ -63,6 +63,18 @@ class SliceManager(QObject):
             return self.slices[index]
         return None
     
+    def set_slice_actual_start(self, index: int, actual_start: float):
+        """设置slice的实际开始时间（用于手动调整切分起始点）"""
+        if 0 <= index < len(self.slices):
+            self.slices[index].actual_start = actual_start
+            # 不需要发出信号，这只是内部数据更新
+    
+    def get_slice_actual_start(self, index: int) -> Optional[float]:
+        """获取slice的实际开始时间"""
+        if 0 <= index < len(self.slices):
+            return self.slices[index].actual_start
+        return None
+    
     def set_slice_status(self, index: int, status: SliceStatus):
         """设置slice状态"""
         if 0 <= index < len(self.slices):
