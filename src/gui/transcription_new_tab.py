@@ -1,3 +1,17 @@
+# AI-Assisted Development Note:
+# To prevent Windows MAX_PATH (260 character) errors, this module must adhere to the following rule:
+#
+# DO NOT construct file paths for writing to disk within this file.
+#
+# All file-writing operations related to transcription results are delegated to the
+# `WhisperTranscriber` class, which implements environment-aware path shortening.
+# This GUI module receives the final, safe, absolute path of the result directory
+# via the `transcription_finished` signal and stores it in `self.last_result_dir`.
+#
+# Any new feature requiring access to result files MUST use the path from
+# `self.last_result_dir` and MUST NOT attempt to guess or reconstruct the path
+# from the original media filename.
+
 from PyQt5.QtWidgets import (QWidget, QHBoxLayout, QVBoxLayout, QLabel, 
                             QPushButton, QFileDialog, QTextBrowser, QProgressBar,  # 改为 QTextBrowser
                             QComboBox, QMenu, QAction, QLineEdit, QFormLayout, QDialog, QDialogButtonBox)
@@ -62,6 +76,7 @@ class TranscriptionNewTab(TabInterface):
         self.duration = None
         self.slices = None
         self.log_queue = []
+        self.last_result_dir = None  # Store actual result directory from backend
         
         # For transcription control
         self.transcription_in_progress = False
@@ -329,41 +344,16 @@ class TranscriptionNewTab(TabInterface):
         )
     
     def _get_result_directory(self):
-        """获取转录结果目录的路径，如果目录不存在则返回父目录"""
-        if not self.file_path:
+        """Returns the actual result directory from the last successful transcription."""
+        if not self.last_result_dir:
+            self.update_log("Result directory not available. Please run a transcription first.")
             return None
         
-        try:
-            # 从环境变量获取项目根目录
-            project_root = os.environ.get('PROJECT_ROOT')
-            if not project_root:
-                self.update_log("Error: PROJECT_ROOT not set")
-                return None
-            
-            # 获取文件名（不含扩展名）
-            file_name_core = os.path.splitext(os.path.basename(self.file_path))[0]
-            
-            # 构建结果目录路径并规范化
-            result_dir = os.path.normpath(os.path.join(
-                project_root,
-                "transcription_result",
-                file_name_core
-            ))
-            
-            # 检查目录是否存在，如果不存在则尝试返回父目录
-            if not os.path.exists(result_dir):
-                parent_dir = os.path.dirname(result_dir)
-                if os.path.exists(parent_dir):
-                    return parent_dir
-                else:
-                    self.update_log(f"Directory not found: {result_dir}")
-                    return None
-                    
-            return result_dir
-            
-        except Exception as e:
-            self.update_log(f"Error determining result directory: {str(e)}")
+        if not os.path.exists(self.last_result_dir):
+            self.update_log(f"Directory not found: {self.last_result_dir}")
             return None
+            
+        return self.last_result_dir
 
     def open_result_directory(self):
         result_dir = self._get_result_directory()
@@ -403,8 +393,9 @@ class TranscriptionNewTab(TabInterface):
         elif action == 'open_vscode':
             self.open_in_vscode()
 
-    def transcription_finished(self, success):
-        if success:
+    def transcription_finished(self, success, result_dir=""):
+        if success and result_dir:
+            self.last_result_dir = result_dir  # Store the actual result directory
             self.update_log("\nTranscription completed successfully B")
             self.update_log("Actions:")
             # 安全地断开旧的连接
@@ -472,7 +463,7 @@ class TranscriptionNewTab(TabInterface):
 
 class TranscriptionThread(QThread):
     log_signal = pyqtSignal(str)
-    finished_signal = pyqtSignal(bool)
+    finished_signal = pyqtSignal(bool, str)  # Include result directory path
     progress_signal = pyqtSignal(int)
     slice_completed_signal = pyqtSignal()  # Signal for real-time progress update
 
@@ -493,6 +484,7 @@ class TranscriptionThread(QThread):
         self.active_threads = 0
         self.lock = threading.Lock()
         self.result_queue = queue.Queue()
+        self.last_successful_result_dir = None  # Track the result directory
 
         self.slice_completed_signal.connect(self._on_slice_completed)
     
@@ -530,7 +522,7 @@ class TranscriptionThread(QThread):
             self.log_signal.emit(f"\nProcessing segment {i+1}/{self.total_slices} (slice {slice_index})")
             self.log_signal.emit(f"Slice start: {slice_start}s, Actual start: {actual_start}s, Duration: {duration}s")
             
-            result = self.transcriber.transcribe(
+            result_data = self.transcriber.transcribe(
                 input_file=self.file_path,
                 display_start=slice_start,
                 actual_start=actual_start,
@@ -538,11 +530,14 @@ class TranscriptionThread(QThread):
                 log_callback=self.log_signal.emit
             )
             
-            if result is None:
+            if result_data is None:
                 self.slice_manager.set_slice_status(slice_index, SliceStatus.FAILURE)
                 self.log_signal.emit(f"Failed to transcribe segment {i+1}")
-                self.finished_signal.emit(False)
+                self.finished_signal.emit(False, "")
                 return
+            
+            # Store the result directory from the successful transcription
+            self.last_successful_result_dir = result_data["result_dir"]
             
             self.slice_manager.set_slice_status(slice_index, SliceStatus.DONE)
             # Use the connected slot to update progress
@@ -552,7 +547,7 @@ class TranscriptionThread(QThread):
             if i < self.total_slices - 1:  # Don't delay after the last slice
                 time.sleep(self.api_delay)
         
-        self.finished_signal.emit(True)
+        self.finished_signal.emit(True, self.last_successful_result_dir or "")
     
     def run_parallel(self):
         """Run transcription with limited concurrency"""
@@ -590,25 +585,29 @@ class TranscriptionThread(QThread):
                     break
                 
                 try:
-                    success = future.result()
-                    if not success:
+                    result_data = future.result()
+                    if not result_data.get("success"):
                         self.log_signal.emit(f"Transcription failed for slice {future_to_index[future]}. Stopping all tasks.")
-                        self.finished_signal.emit(False)
+                        self.finished_signal.emit(False, "")
                         # Cancel remaining futures
                         for f in future_to_index:
                             f.cancel()
                         return
+                    
+                    # Store the last successful result directory
+                    if result_data.get("result_dir"):
+                        self.last_successful_result_dir = result_data["result_dir"]
                         
                 except Exception as e:
                     self.log_signal.emit(f"Error in parallel transcription: {str(e)}")
-                    self.finished_signal.emit(False)
+                    self.finished_signal.emit(False, "")
                     return
         
         if self.stop_requested:
             self.log_signal.emit("\nTranscription stopped by user")
-            self.finished_signal.emit(False)
+            self.finished_signal.emit(False, "")
         else:
-            self.finished_signal.emit(True)
+            self.finished_signal.emit(True, self.last_successful_result_dir or "")
     
     def transcribe_single_slice(self, task_index, slice_start, duration, actual_start):
         """Transcribe a single slice (used by parallel processing)"""
@@ -620,7 +619,7 @@ class TranscriptionThread(QThread):
         self.log_signal.emit(f"\nStarting slice {slice_index} (task {task_index+1}/{self.total_slices})")
         self.log_signal.emit(f"Slice start: {slice_start}s, Actual start: {actual_start}s, Duration: {duration}s")
         
-        result = self.transcriber.transcribe(
+        result_data = self.transcriber.transcribe(
             input_file=self.file_path,
             display_start=slice_start,
             actual_start=actual_start,
@@ -628,14 +627,14 @@ class TranscriptionThread(QThread):
             log_callback=self.log_signal.emit
         )
         
-        if result is None:
+        if result_data is None:
             self.slice_manager.set_slice_status(slice_index, SliceStatus.FAILURE)
             self.log_signal.emit(f"Failed to transcribe slice {slice_index}")
             # Do not emit progress signal here, let the main loop handle failure
-            return False
+            return {"success": False, "result_dir": None}
         
         self.slice_manager.set_slice_status(slice_index, SliceStatus.DONE)
         self.log_signal.emit(f"Completed slice {slice_index}")
         # Emit signal to notify progress update
         self.slice_completed_signal.emit()
-        return True
+        return {"success": True, "result_dir": result_data["result_dir"]}

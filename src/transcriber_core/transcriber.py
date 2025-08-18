@@ -4,6 +4,9 @@ import requests
 from pathlib import Path
 from typing import Optional, Callable
 from src.configuration_manager.configuration_manager import ConfigManager
+import re
+import platform
+import hashlib
 
 class WhisperTranscriber:
     def __init__(self):
@@ -17,11 +20,86 @@ class WhisperTranscriber:
         self.tmp_dir.mkdir(exist_ok=True)
         self.result_dir.mkdir(exist_ok=True)
         
+        # Calculate maximum safe filename length for Windows MAX_PATH compatibility
+        self.max_stem_length = 200  # Default for non-Windows systems
+        if platform.system() == "Windows":
+            # Windows MAX_PATH is 260, use conservative 240 to account for variations
+            WINDOWS_MAX_PATH = 240
+            
+            # Account for the longest possible suffix we generate:
+            # /<safe_stem>/<safe_stem>_ss{start}-t{duration}_cut_result.json
+            # Estimate: subdirectory separator + filename with timestamps + extension
+            FILENAME_SUFFIX_MARGIN = 80
+            
+            abs_result_dir_len = len(str(self.result_dir.resolve()))
+            
+            # Calculate available length for stem (used twice: in directory and filename)
+            available_length = WINDOWS_MAX_PATH - abs_result_dir_len - FILENAME_SUFFIX_MARGIN
+            calculated_stem_length = available_length // 2
+            
+            # Ensure minimum viable length
+            self.max_stem_length = max(20, calculated_stem_length)
+            
+            if self.max_stem_length < 50:
+                print(f"WARNING: Project path is very deep. Filenames will be "
+                      f"aggressively shortened to {self.max_stem_length} characters "
+                      f"to prevent Windows MAX_PATH errors.")
+        
         # self.api_key = Path("api_key_archive").read_text().strip()
         # self.api_endpoint = Path("api_endpoint").read_text().strip() + "/v1/audio/transcriptions"
         
         self.current_model = None
         self.current_provider = None
+
+    def _sanitize_filename(self, filename: str, log_callback: Optional[Callable[[str], None]] = None) -> str:
+        """
+        Sanitize filename and apply hash-based truncation if needed to prevent Windows MAX_PATH issues.
+        
+        Args:
+            filename: Original filename to sanitize
+            log_callback: Optional callback for logging messages
+            
+        Returns:
+            str: Sanitized filename, potentially with hash suffix if truncated
+        """
+        # Step 1: Basic sanitization of illegal characters
+        # Remove/replace: < > : " | ? * and control characters
+        sanitized = re.sub(r'[<>:"|?*\x00-\x1f]', '_', filename)
+        
+        # Replace brackets with parentheses (safer for paths)
+        sanitized = sanitized.replace('[', '(').replace(']', ')')
+        
+        # Remove multiple consecutive spaces and replace with single space
+        sanitized = re.sub(r'\s+', ' ', sanitized).strip()
+        sanitized = sanitized.rstrip('.-_ ')
+        
+        # Ensure the result is not empty
+        if not sanitized:
+            sanitized = "unnamed_file"
+        
+        # Step 2: Check if truncation and hashing are needed
+        if len(sanitized) > self.max_stem_length:
+            self._log(log_callback, 
+                     f"Filename '{sanitized[:30]}...' exceeds safe length and will be shortened "
+                     f"to prevent path errors.")
+            
+            # Generate deterministic hash from original filename to ensure uniqueness
+            hash_suffix = hashlib.sha1(filename.encode('utf-8')).hexdigest()[:8]
+            
+            # Calculate prefix length to fit within our limit
+            prefix_length = self.max_stem_length - len(hash_suffix) - 1  # -1 for underscore
+            prefix_length = max(1, prefix_length)  # Ensure at least 1 character for prefix
+            
+            # Truncate and combine with hash
+            truncated_prefix = sanitized[:prefix_length].rstrip('.-_ ')
+            if not truncated_prefix:  # Fallback if prefix becomes empty
+                truncated_prefix = "file"
+            
+            result = f"{truncated_prefix}_{hash_suffix}"
+            self._log(log_callback, f"Shortened filename: '{result}'")
+            return result
+        
+        return sanitized
 
     def set_model_and_provider(self, model: str, provider: str) -> bool:
         """
@@ -107,10 +185,12 @@ class WhisperTranscriber:
             file_stem = input_path.stem
             output_format = self._get_output_format(input_path)
             
+            # Sanitize filenames to avoid path length issues
+            safe_file_stem = self._sanitize_filename(file_stem, log_callback=log_callback)
+            
             # Generate unique temporary filename to avoid concurrent conflicts
-            # Format: {file_stem}_ss{display_start}-t{duration}_cut.{format}
-            # This matches the result JSON file naming pattern for consistency
-            audio_segment = self.tmp_dir / f"{file_stem}_ss{display_start}-t{duration}_cut.{output_format}"
+            # Format: {safe_file_stem}_ss{display_start}-t{duration}_cut.{format}
+            audio_segment = self.tmp_dir / f"{safe_file_stem}_ss{display_start}-t{duration}_cut.{output_format}"
             
             self._log(log_callback, f"Using temporary audio file: {audio_segment}")
             
@@ -121,11 +201,10 @@ class WhisperTranscriber:
                 duration - (actual_start - display_start), log_callback):
                 return None
 
-            # Prepare output directory and file
-            result_dir = self.result_dir / file_stem
-            result_dir.mkdir(exist_ok=True)
-            result_file = result_dir / \
-                f"{audio_segment.stem}_result.json"
+            # Prepare output directory and file with sanitized names
+            result_dir = self.result_dir / safe_file_stem
+            result_dir.mkdir(parents=True, exist_ok=True)
+            result_file = result_dir / f"{audio_segment.stem}_result.json"
             self._log(log_callback, f"Will save result to: {result_file}")
 
             # Call Whisper API
@@ -146,10 +225,14 @@ class WhisperTranscriber:
             
             if result:
                 self._log(log_callback, "Transcription completed successfully C.")
+                # Return both result and the directory path for GUI integration
+                return {
+                    "result": result,
+                    "result_dir": str(result_dir)
+                }
             else:
                 self._log(log_callback, "Transcription failed.")
-
-            return result
+                return None
 
         except Exception as e:
             self._log(log_callback, f"Transcription failed: {e}")
