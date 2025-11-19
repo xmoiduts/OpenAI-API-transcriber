@@ -21,7 +21,9 @@ def find_overlapping_intervals(intervals):
     from typing import List, Tuple
 
 def is_subsequence(A2: list, B: str):
-    # Test if A2 (token-precise words) join up to the subsequence of B (full text of a segment returned by transcribe API like whisper)
+    # Test if A2 (token-precise words) join up to\
+    #   the subsequence of B (full text of a segment\
+    #   returned by transcribe API like whisper)
     # A2: list of dict item: {"word", "start", "end"}
     A = "".join([w["word"] for w in A2])
     i = j = 0

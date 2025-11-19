@@ -198,6 +198,11 @@ class TimeSlicerTab(TabInterface):
         self.current_file_path = ""
         self.file_duration = 0
         self.file_audio_bitrate = 0
+        self.can_copy_codec = False
+        self.has_perturbation = False
+        self.needs_transcoding = False
+        self.effective_bitrate = 0
+        self.output_format = None
         self.current_flying_label = None
 
         self.init_ui()
@@ -234,6 +239,8 @@ class TimeSlicerTab(TabInterface):
         layout.addWidget(self.file_length_label)
 
         self.segment_bar = SegmentBar(mode="time_slicer")
+        # Connect perturbation signal to handle slicing recalculation
+        self.segment_bar.perturbation_changed.connect(self.on_perturbation_changed)
         layout.addWidget(self.segment_bar)
 
         button_layout = QHBoxLayout()
@@ -350,10 +357,11 @@ class TimeSlicerTab(TabInterface):
 
     def parse_file_duration_and_bitrate(self, file_path):
         try:
-            self.file_duration, self.file_audio_bitrate = probe_media_file(file_path)
+            self.file_duration, self.file_audio_bitrate, self.can_copy_codec = probe_media_file(file_path)
+            codec_str = " (can copy)" if self.can_copy_codec else " (needs transcode)"
             self.file_length_label.setText(
-                f"File length: {self.file_duration:.2f} seconds, \
-                Audio bitrate: {self.file_audio_bitrate/1000:.2f} kbps")
+                f"File length: {self.file_duration:.2f} seconds, "
+                f"Audio bitrate: {self.file_audio_bitrate/1000:.2f} kbps{codec_str}")
         except Exception as e:
             self.file_length_label.setText(f"Error: {str(e)}")
 
@@ -367,7 +375,8 @@ class TimeSlicerTab(TabInterface):
         main_window = self.get_main_window()
         if main_window and hasattr(main_window, 'update_transcription_tab'):
             main_window.update_transcription_tab(
-                self.current_file_path, self.file_duration, self.segment_bar.segments)
+                self.current_file_path, self.file_duration, self.segment_bar.segments,
+                self.needs_transcoding, self.effective_bitrate, self.output_format)
         else:
             print("Warning: Could not update transcription tab")
 
@@ -381,11 +390,46 @@ class TimeSlicerTab(TabInterface):
 
     def update_segments(self):
         if self.file_duration:
-            slices = get_time_slices(self.file_duration, self.file_audio_bitrate)
-            self.segment_bar.set_segments(slices)
+            slices, needs_transcoding, effective_bitrate, output_format = get_time_slices(
+                self.file_duration, self.file_audio_bitrate, 
+                self.can_copy_codec, self.has_perturbation
+            )
+            self.needs_transcoding = needs_transcoding
+            self.effective_bitrate = effective_bitrate
+            self.output_format = output_format
+            self.segment_bar.set_segments(slices, needs_transcoding, effective_bitrate)
+            # Note: Transcoding info is shown in the segment bar visualization (serrated edges + tooltip)
         else:
             self.segment_bar.set_segments([])
 
+    def on_perturbation_changed(self, seed):
+        """Handle perturbation toggle - recalculate slicing as it affects can_copy"""
+        was_perturbation = self.has_perturbation
+        self.has_perturbation = (seed is not None)
+        
+        # Only recalculate if we have a file loaded and perturbation state changed
+        if self.file_duration > 0 and was_perturbation != self.has_perturbation:
+            old_can_copy = self.can_copy_codec and not was_perturbation
+            new_can_copy = self.can_copy_codec and not self.has_perturbation
+            
+            # Recalculate slicing
+            self.update_segments()
+            
+            # Show flying message to inform user
+            if old_can_copy and not new_can_copy:
+                from .flying_message import show_flying_message
+                show_flying_message(self, "Perturbation enabled: Audio will be re-encoded")
+            elif not old_can_copy and new_can_copy:
+                from .flying_message import show_flying_message
+                show_flying_message(self, "Perturbation disabled: Audio can be copied without re-encoding")
+            
+            # Update main window with new slicing info
+            main_window = self.get_main_window()
+            if main_window and hasattr(main_window, 'update_transcription_tab'):
+                main_window.update_transcription_tab(
+                    self.current_file_path, self.file_duration, self.segment_bar.segments,
+                    self.needs_transcoding, self.effective_bitrate, self.output_format)
+    
     def reload_application(self):
         QApplication.quit()
         subprocess.Popen([sys.executable] + sys.argv)

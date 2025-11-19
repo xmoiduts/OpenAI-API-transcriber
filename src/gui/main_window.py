@@ -25,16 +25,21 @@ class MainWindow(QMainWindow):
         self.tab_widget.addTab(self.time_slicer_tab, "Time Slicer")
         self.tab_widget.addTab(self.transcription_tab, "Tr-old")
         self.tab_widget.addTab(self.transcription_new_tab, "Transcription New")
-        self.tab_widget.addTab(self.merge_paragraph_tab, "Merge Paragraph")
+        self.tab_widget.addTab(self.merge_paragraph_tab, "ASR post process")
         self.tab_widget.addTab(self.line_translation_tab, "Line Translation")
 
         self.setStyleSheet(get_main_window_stylesheet())
 
-    def update_transcription_tab(self, file_path, duration, slices):
-        self.transcription_tab.update_from_other_tab(
-            {"file_path": file_path, "duration": duration, "slices": slices})
-        self.transcription_new_tab.update_from_other_tab(
-            {"file_path": file_path, "duration": duration, "slices": slices})
-        self.merge_paragraph_tab.update_from_other_tab(
-            {"file_path": file_path, "duration": duration, "slices": slices})
+    def update_transcription_tab(self, file_path, duration, slices, needs_transcoding=False, effective_bitrate=0, output_format=None):
+        data = {
+            "file_path": file_path, 
+            "duration": duration, 
+            "slices": slices,
+            "needs_transcoding": needs_transcoding,
+            "effective_bitrate": effective_bitrate,
+            "output_format": output_format
+        }
+        self.transcription_tab.update_from_other_tab(data)
+        self.transcription_new_tab.update_from_other_tab(data)
+        self.merge_paragraph_tab.update_from_other_tab(data)
 

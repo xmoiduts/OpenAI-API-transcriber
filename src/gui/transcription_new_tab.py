@@ -30,6 +30,7 @@ import subprocess
 import time
 import queue
 import threading
+import random
 
 class SettingsDialog(QDialog):
     def __init__(self, parent=None, concurrency=4, delay=15):
@@ -71,10 +72,16 @@ class TranscriptionNewTab(TabInterface):
         # Add settings
         self.concurrency = 4
         self.api_delay = 30
+        self.perturbation_seed = None  # Add perturbation seed storage
+        self.preserve_audio_clips = False  # Add preserve audio clips flag
+        self.dry_run = False  # Add dry run flag
         self.init_ui()
         self.file_path = None
         self.duration = None
         self.slices = None
+        self.needs_transcoding = False  # Whether transcoding is needed
+        self.target_bitrate = 128000  # Target bitrate for transcoding
+        self.output_format = None  # Output format (None means keep original, 'm4a' for transcoding)
         self.log_queue = []
         self.last_result_dir = None  # Store actual result directory from backend
         
@@ -143,6 +150,8 @@ class TranscriptionNewTab(TabInterface):
         self.file_info_label.setWordWrap(True)
         top_section.addWidget(self.file_info_label)
         self.segment_bar = SegmentBar(mode="transcription")
+        # Connect perturbation signal
+        self.segment_bar.perturbation_changed.connect(self.set_perturbation_seed)
         top_section.addWidget(self.segment_bar)
         
         # Progress section
@@ -239,6 +248,9 @@ class TranscriptionNewTab(TabInterface):
         self.file_path = data.get("file_path")
         self.duration = data.get("duration")
         self.slices = data.get("slices")
+        self.needs_transcoding = data.get("needs_transcoding", False)
+        self.target_bitrate = data.get("effective_bitrate", 128000)
+        self.output_format = data.get("output_format")
         if self.file_path and self.duration:
             # Format file path to show only the last part if too long
             file_name = self.file_path.split('/')[-1]  # Get just the filename
@@ -252,7 +264,7 @@ class TranscriptionNewTab(TabInterface):
             # Disable the button when no file is selected
             self.transcribe_button.setEnabled(False)  
         if self.file_path and self.duration:
-            self.segment_bar.set_segments(self.slices)
+            self.segment_bar.set_segments(self.slices, self.needs_transcoding, self.target_bitrate)
         else:
             self.segment_bar.set_segments([])
 
@@ -310,7 +322,13 @@ class TranscriptionNewTab(TabInterface):
                 slices_to_transcribe,  # Pass slice indices
                 slice_manager,
                 self.concurrency,
-                self.api_delay
+                self.api_delay,
+                self.perturbation_seed,  # Pass perturbation seed
+                self.needs_transcoding,  # Pass transcoding flag
+                self.target_bitrate,  # Pass target bitrate
+                self.output_format,  # Pass output format
+                self.preserve_audio_clips,  # Pass preserve audio clips flag
+                self.dry_run  # Pass dry run flag
             )
             self.transcription_thread.log_signal.connect(self.update_log)
             self.transcription_thread.finished_signal.connect(self.transcription_finished)
@@ -386,12 +404,33 @@ class TranscriptionNewTab(TabInterface):
         except Exception as e:
             self.update_log(f"Error opening VSCode: {str(e)}")
 
+    def open_in_cursor(self):
+        result_dir = self._get_result_directory()
+        if not result_dir:
+            return
+            
+        try:
+            subprocess.run(
+                ["cursor", "."],
+                cwd=result_dir,
+                check=True,
+                shell=True,  # 使用 shell 执行
+                capture_output=True,
+                text=True,
+            )
+        except FileNotFoundError:
+            self.update_log("Cursor not found in system PATH")
+        except Exception as e:
+            self.update_log(f"Error opening Cursor: {str(e)}")
+
     def handle_link_click(self, url):
         action = url.toString()
         if action == 'open_dir':
             self.open_result_directory()
         elif action == 'open_vscode':
             self.open_in_vscode()
+        elif action == 'open_cursor':
+            self.open_in_cursor()
 
     def transcription_finished(self, success, result_dir=""):
         if success and result_dir:
@@ -406,6 +445,7 @@ class TranscriptionNewTab(TabInterface):
             
             self.log_display.insertHtml(" • <a href='open_dir'>Open Result Directory</a><br>")
             self.log_display.insertHtml(" • <a href='open_vscode'>Open in VSCode</a><br>")
+            self.log_display.insertHtml(" • <a href='open_cursor'>Open in Cursor</a><br>")
             self.log_display.setReadOnly(True)
             self.log_display.anchorClicked.connect(self.handle_link_click)
             self.log_display.setOpenLinks(False)
@@ -440,11 +480,28 @@ class TranscriptionNewTab(TabInterface):
         concurrency_action = QAction(f"Concurrency: {self.concurrency}", self)
         delay_action = QAction(f"API Delay: {self.api_delay}s", self)
         
+        # Add preserve audio clips checkbox
+        preserve_clips_action = QAction("Preserve cut audio clips", self)
+        preserve_clips_action.setCheckable(True)
+        preserve_clips_action.setChecked(self.preserve_audio_clips)
+        
+        # Add dry run checkbox
+        dry_run_action = QAction("Dry Run (Clip only)", self)
+        dry_run_action.setCheckable(True)
+        dry_run_action.setChecked(self.dry_run)
+        dry_run_action.setToolTip("Process audio clips without sending to transcription API")
+        dry_run_action.setStatusTip("Process audio clips without sending to transcription API")
+        
         concurrency_action.triggered.connect(lambda: self.edit_setting('concurrency'))
         delay_action.triggered.connect(lambda: self.edit_setting('delay'))
+        preserve_clips_action.triggered.connect(lambda: self.toggle_preserve_clips(preserve_clips_action.isChecked()))
+        dry_run_action.triggered.connect(lambda: self.toggle_dry_run(dry_run_action.isChecked()))
         
         menu.addAction(concurrency_action)
         menu.addAction(delay_action)
+        menu.addSeparator()
+        menu.addAction(preserve_clips_action)
+        menu.addAction(dry_run_action)
         
         # Show menu at global position
         global_pos = self.settings_button.mapToGlobal(position)
@@ -461,13 +518,36 @@ class TranscriptionNewTab(TabInterface):
                 self.api_delay = max(0, delay)  # Ensure non-negative
                 show_flying_message(self, f"Settings updated: Concurrency={self.concurrency}, Delay={self.api_delay}s")
 
+    def toggle_preserve_clips(self, checked):
+        """Toggle preserve audio clips setting"""
+        self.preserve_audio_clips = checked
+        status = "enabled" if checked else "disabled"
+        show_flying_message(self, f"Preserve audio clips {status}")
+
+    def toggle_dry_run(self, checked):
+        """Toggle dry run setting"""
+        self.dry_run = checked
+        status = "enabled" if checked else "disabled"
+        show_flying_message(self, f"Dry run {status}")
+
+    def set_perturbation_seed(self, seed):
+        """Set the perturbation seed for audio processing."""
+        self.perturbation_seed = seed
+        if seed is not None:
+            show_flying_message(self, f"Perturbation enabled with seed: {seed:04x}")
+        else:
+            show_flying_message(self, "Perturbation disabled")
+
 class TranscriptionThread(QThread):
     log_signal = pyqtSignal(str)
     finished_signal = pyqtSignal(bool, str)  # Include result directory path
     progress_signal = pyqtSignal(int)
     slice_completed_signal = pyqtSignal()  # Signal for real-time progress update
 
-    def __init__(self, transcriber, file_path, slices_with_offsets, slice_indices, slice_manager, concurrency, api_delay):
+    def __init__(self, transcriber, file_path, slices_with_offsets, slice_indices, 
+                 slice_manager, concurrency, api_delay, perturbation_seed=None,
+                 needs_transcoding=False, target_bitrate=128000, output_format=None,
+                 preserve_audio_clips=False, dry_run=False):
         super().__init__()
         self.transcriber = transcriber
         self.file_path = file_path
@@ -476,6 +556,12 @@ class TranscriptionThread(QThread):
         self.slice_manager = slice_manager
         self.concurrency = concurrency
         self.api_delay = api_delay
+        self.perturbation_seed = perturbation_seed  # Store perturbation seed
+        self.needs_transcoding = needs_transcoding  # Whether transcoding is needed
+        self.target_bitrate = target_bitrate  # Target bitrate for transcoding
+        self.output_format = output_format  # Output format (None or 'm4a')
+        self.preserve_audio_clips = preserve_audio_clips  # Store preserve audio clips flag
+        self.dry_run = dry_run  # Store dry run flag
         self.stop_requested = False
         
         # For managing concurrent transcription
@@ -494,6 +580,20 @@ class TranscriptionThread(QThread):
             self.completed_slices += 1
             progress = int((self.completed_slices / self.total_slices) * 100)
             self.progress_signal.emit(progress)
+    
+    def _drain_log_queue(self):
+        """Continuously drain the log queue and emit log signals."""
+        while True:
+            try:
+                msg_type, msg = self.result_queue.get(timeout=0.1)
+                if msg_type == 'log':
+                    self.log_signal.emit(msg)
+                elif msg_type == 'stop':
+                    break
+            except queue.Empty:
+                if self.stop_requested or not threading.main_thread().is_alive():
+                    break
+                continue
 
     def run(self):
         try:
@@ -527,7 +627,13 @@ class TranscriptionThread(QThread):
                 display_start=slice_start,
                 actual_start=actual_start,
                 duration=int(duration),
-                log_callback=self.log_signal.emit
+                log_callback=self.log_signal.emit,
+                perturbation_seed=self.perturbation_seed,  # Pass perturbation seed
+                needs_transcoding=self.needs_transcoding,  # Pass transcoding flag
+                target_bitrate=self.target_bitrate,  # Pass target bitrate
+                output_format=self.output_format,  # Pass output format
+                preserve_audio_clips=self.preserve_audio_clips,  # Pass preserve audio clips flag
+                dry_run=self.dry_run  # Pass dry run flag
             )
             
             if result_data is None:
@@ -553,9 +659,15 @@ class TranscriptionThread(QThread):
         """Run transcription with limited concurrency"""
         import concurrent.futures
         
-        self.log_signal.emit(f"Starting parallel transcription with concurrency: {self.concurrency}")
+        # Adjust concurrency to not exceed the number of slices
+        actual_concurrency = min(self.concurrency, self.total_slices)
+        self.log_signal.emit(f"Starting parallel transcription with concurrency: {actual_concurrency}")
         
-        with concurrent.futures.ThreadPoolExecutor(max_workers=self.concurrency) as executor:
+        # Start a thread to drain the log queue
+        log_thread = threading.Thread(target=self._drain_log_queue, daemon=True)
+        log_thread.start()
+        
+        with concurrent.futures.ThreadPoolExecutor(max_workers=actual_concurrency) as executor:
             # Submit all tasks
             future_to_index = {}
             for i, ((slice_start, duration), actual_start) in enumerate(self.slices_with_offsets):
@@ -588,6 +700,9 @@ class TranscriptionThread(QThread):
                     result_data = future.result()
                     if not result_data.get("success"):
                         self.log_signal.emit(f"Transcription failed for slice {future_to_index[future]}. Stopping all tasks.")
+                        # Stop the log thread
+                        self.result_queue.put(('stop', None))
+                        log_thread.join(timeout=1)
                         self.finished_signal.emit(False, "")
                         # Cancel remaining futures
                         for f in future_to_index:
@@ -600,8 +715,15 @@ class TranscriptionThread(QThread):
                         
                 except Exception as e:
                     self.log_signal.emit(f"Error in parallel transcription: {str(e)}")
+                    # Stop the log thread
+                    self.result_queue.put(('stop', None))
+                    log_thread.join(timeout=1)
                     self.finished_signal.emit(False, "")
                     return
+        
+        # Stop the log thread
+        self.result_queue.put(('stop', None))
+        log_thread.join(timeout=1)
         
         if self.stop_requested:
             self.log_signal.emit("\nTranscription stopped by user")
@@ -612,29 +734,39 @@ class TranscriptionThread(QThread):
     def transcribe_single_slice(self, task_index, slice_start, duration, actual_start):
         """Transcribe a single slice (used by parallel processing)"""
         if self.stop_requested:
-            return False
+            return {"success": False, "result_dir": None}
             
         slice_index = self.slice_indices[task_index]
         
-        self.log_signal.emit(f"\nStarting slice {slice_index} (task {task_index+1}/{self.total_slices})")
-        self.log_signal.emit(f"Slice start: {slice_start}s, Actual start: {actual_start}s, Duration: {duration}s")
+        # Log start of processing
+        self.result_queue.put(('log', f"\nProcessing segment {task_index+1}/{self.total_slices} (slice {slice_index})"))
+        self.result_queue.put(('log', f"Slice start: {slice_start}s, Actual start: {actual_start}s, Duration: {duration}s"))
+        
+        # Set status to transcribing
+        self.slice_manager.set_slice_status(slice_index, SliceStatus.TRANSCRIBING)
         
         result_data = self.transcriber.transcribe(
             input_file=self.file_path,
             display_start=slice_start,
             actual_start=actual_start,
             duration=int(duration),
-            log_callback=self.log_signal.emit
+            log_callback=lambda msg: self.result_queue.put(('log', msg)),
+            perturbation_seed=self.perturbation_seed,  # Pass perturbation seed
+            needs_transcoding=self.needs_transcoding,  # Pass transcoding flag
+            target_bitrate=self.target_bitrate,  # Pass target bitrate
+            output_format=self.output_format,  # Pass output format
+            preserve_audio_clips=self.preserve_audio_clips,  # Pass preserve audio clips flag
+            dry_run=self.dry_run  # Pass dry run flag
         )
         
         if result_data is None:
             self.slice_manager.set_slice_status(slice_index, SliceStatus.FAILURE)
-            self.log_signal.emit(f"Failed to transcribe slice {slice_index}")
+            self.result_queue.put(('log', f"Failed to transcribe segment {task_index+1}"))
             # Do not emit progress signal here, let the main loop handle failure
             return {"success": False, "result_dir": None}
         
         self.slice_manager.set_slice_status(slice_index, SliceStatus.DONE)
-        self.log_signal.emit(f"Completed slice {slice_index}")
+        self.result_queue.put(('log', f"Completed slice {slice_index}"))
         # Emit signal to notify progress update
         self.slice_completed_signal.emit()
         return {"success": True, "result_dir": result_data["result_dir"]}

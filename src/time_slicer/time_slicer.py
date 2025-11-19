@@ -1,28 +1,58 @@
 import math
 
-PADDING = 9 # seconds
-SLICE_DURATION_MINUTES=10
-def get_time_slices(total_duration, audio_bitrate):
+PADDING = 9  # seconds
+SLICE_DURATION_MINUTES = 10
+TARGET_MAX_FILE_SIZE = 25 * 1024 * 1024  # 15MB in bytes (60% of 25MB), not hard limit
+MIN_TRANSCODE_BITRATE = 128000  # 128kbps - minimum bitrate for transcoding
+
+def get_time_slices(total_duration, audio_bitrate, can_copy_codec, has_perturbation):
     """
-    Given a total duration in seconds and a file path, return a list of time slices.
-    Each slice is about 10 minutes long and the audio track should be about 10-15MB.
+    Given media information, return time slices with transcoding decision.
+    
+    Logic:
+    - can_copy = (format can copy) AND NOT (perturbation enabled)
+    - If can_copy: slice by input size, each slice <= TARGET_MAX_FILE_SIZE and <= 10min
+    - If not can_copy: 
+        - output_bitrate = max(MIN_TRANSCODE_BITRATE, input_bitrate)
+        - output_format = m4a
+        - slice by output size, each slice <= TARGET_MAX_FILE_SIZE and <= 10min
 
     :param total_duration: Total duration of the media file in seconds
-    :param file_path: Path to the media file
-    :return: List of tuples (start_time, duration)
+    :param audio_bitrate: Audio bitrate in bits per second
+    :param can_copy_codec: Whether the audio codec can be copied without re-encoding
+    :param has_perturbation: Whether audio perturbation is enabled
+    :return: Tuple (slices, needs_transcoding, output_bitrate, output_format)
     """
-    minutes = 60 # 1min = 60s
-    target_slice_duration = SLICE_DURATION_MINUTES * minutes  # default should be: 10 minutes in seconds
-    max_file_size = 15 * 1024 * 1024  # 15MB in bytes (60% of 25MB)
+    minutes = 60  # 1min = 60s
+    target_slice_duration = SLICE_DURATION_MINUTES * minutes  # 10 minutes in seconds
 
-    # Calculate maximum duration for a 15MB slice
-    max_duration = math.floor((max_file_size * 8) / audio_bitrate)
+    # Determine if we can copy codec
+    can_copy = can_copy_codec and not has_perturbation
+    
+    if can_copy:
+        # Can copy: use input bitrate for calculation
+        effective_bitrate = audio_bitrate
+        needs_transcoding = False
+        output_format = None  # Keep original format
+    else:
+        # Need to transcode: use max(MIN_TRANSCODE_BITRATE, input_bitrate)
+        effective_bitrate = max(MIN_TRANSCODE_BITRATE, audio_bitrate)
+        needs_transcoding = True
+        output_format = 'm4a'  # Always output to m4a when transcoding
+    
+    # Calculate maximum duration for a slice with TARGET_MAX_FILE_SIZE
+    # Formula: duration = (file_size_bytes * 8) / bitrate_bps
+    max_duration_by_size = math.floor((TARGET_MAX_FILE_SIZE * 8) / effective_bitrate)
+
+    # Calculate maximum duration for a slice: min(10min, max_duration_by_size)
+    max_duration = min(target_slice_duration, max_duration_by_size)
 
     slices = []
     current_time = 0
 
     while current_time < total_duration:
-        slice_duration = min(target_slice_duration, max_duration, math.ceil(total_duration - current_time))
+        # Each slice duration: min(max_duration, remaining_time)
+        slice_duration = min(max_duration, math.ceil(total_duration - current_time))
         
         # Round start time to nearest 30 seconds for human-friendliness
         rounded_start = round(current_time / 30) * 30
@@ -37,16 +67,15 @@ def get_time_slices(total_duration, audio_bitrate):
     if len(slices) > 1:
         last_slice = slices[-1]
         second_last_slice = slices[-2]
-        min_duration = min(target_slice_duration, max_duration)
 
-        if last_slice[1] < min_duration / 2:
+        if last_slice[1] < max_duration / 2:
             total_time = second_last_slice[1] + last_slice[1]
             new_duration = round(total_time / 2 / 30) * 30
             
             slices[-2] = (second_last_slice[0], new_duration)
             slices[-1] = (second_last_slice[0] + new_duration, math.ceil(total_time - new_duration))
 
-    return pad_intervals_right(slices, PADDING)
+    return pad_intervals_right(slices, PADDING), needs_transcoding, effective_bitrate, output_format
 
 def pad_intervals_right(intervals, padding):
     """
@@ -73,11 +102,23 @@ def pad_intervals_right(intervals, padding):
 #     print(f"Start: {start}, Duration: {duration}")
 
 def mock_calling_function():
-    file_path = "mock_media_file.mp4"
     total_duration = 3600  # 1 hour in seconds
-    time_slices = get_time_slices(total_duration, file_path)
-    for start, duration in time_slices:
-        print(f"Start: {start}, Duration: {duration}")
+    audio_bitrate = 320000  # 320kbps
+    
+    print("Test 1: Can copy, no perturbation")
+    time_slices, needs_transcoding, eff_br, fmt = get_time_slices(total_duration, audio_bitrate, True, False)
+    print(f"  Needs transcoding: {needs_transcoding}, Effective bitrate: {eff_br/1000:.0f}kbps, Format: {fmt}")
+    print(f"  Slices: {len(time_slices)}")
+    
+    print("\nTest 2: Can copy, with perturbation")
+    time_slices, needs_transcoding, eff_br, fmt = get_time_slices(total_duration, audio_bitrate, True, True)
+    print(f"  Needs transcoding: {needs_transcoding}, Effective bitrate: {eff_br/1000:.0f}kbps, Format: {fmt}")
+    print(f"  Slices: {len(time_slices)}")
+    
+    print("\nTest 3: Cannot copy, no perturbation")
+    time_slices, needs_transcoding, eff_br, fmt = get_time_slices(total_duration, audio_bitrate, False, False)
+    print(f"  Needs transcoding: {needs_transcoding}, Effective bitrate: {eff_br/1000:.0f}kbps, Format: {fmt}")
+    print(f"  Slices: {len(time_slices)}")
 
 # Call the mock function to demonstrate
 #mock_calling_function()

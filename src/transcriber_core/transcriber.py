@@ -1,11 +1,11 @@
 import os
 import json
 import requests
+import shutil
 from pathlib import Path
 from typing import Optional, Callable
 from src.configuration_manager.configuration_manager import ConfigManager
-import re
-import platform
+from src.util.filename_sanitizer import FilenameSanitizer
 import hashlib
 
 class WhisperTranscriber:
@@ -20,30 +20,12 @@ class WhisperTranscriber:
         self.tmp_dir.mkdir(exist_ok=True)
         self.result_dir.mkdir(exist_ok=True)
         
-        # Calculate maximum safe filename length for Windows MAX_PATH compatibility
-        self.max_stem_length = 200  # Default for non-Windows systems
-        if platform.system() == "Windows":
-            # Windows MAX_PATH is 260, use conservative 240 to account for variations
-            WINDOWS_MAX_PATH = 240
-            
-            # Account for the longest possible suffix we generate:
-            # /<safe_stem>/<safe_stem>_ss{start}-t{duration}_cut_result.json
-            # Estimate: subdirectory separator + filename with timestamps + extension
-            FILENAME_SUFFIX_MARGIN = 80
-            
-            abs_result_dir_len = len(str(self.result_dir.resolve()))
-            
-            # Calculate available length for stem (used twice: in directory and filename)
-            available_length = WINDOWS_MAX_PATH - abs_result_dir_len - FILENAME_SUFFIX_MARGIN
-            calculated_stem_length = available_length // 2
-            
-            # Ensure minimum viable length
-            self.max_stem_length = max(20, calculated_stem_length)
-            
-            if self.max_stem_length < 50:
-                print(f"WARNING: Project path is very deep. Filenames will be "
-                      f"aggressively shortened to {self.max_stem_length} characters "
-                      f"to prevent Windows MAX_PATH errors.")
+        # Initialize filename sanitizer for Windows MAX_PATH compatibility
+        self.filename_sanitizer = FilenameSanitizer(self.result_dir)
+        if self.filename_sanitizer.get_max_stem_length() < 50:
+            print(f"WARNING: Project path is very deep. Filenames will be "
+                  f"aggressively shortened to {self.filename_sanitizer.get_max_stem_length()} characters "
+                  f"to prevent Windows MAX_PATH errors.")
         
         # self.api_key = Path("api_key_archive").read_text().strip()
         # self.api_endpoint = Path("api_endpoint").read_text().strip() + "/v1/audio/transcriptions"
@@ -62,44 +44,17 @@ class WhisperTranscriber:
         Returns:
             str: Sanitized filename, potentially with hash suffix if truncated
         """
-        # Step 1: Basic sanitization of illegal characters
-        # Remove/replace: < > : " | ? * and control characters
-        sanitized = re.sub(r'[<>:"|?*\x00-\x1f]', '_', filename)
+        original_length = len(filename)
+        result = self.filename_sanitizer.sanitize(filename)
         
-        # Replace brackets with parentheses (safer for paths)
-        sanitized = sanitized.replace('[', '(').replace(']', ')')
-        
-        # Remove multiple consecutive spaces and replace with single space
-        sanitized = re.sub(r'\s+', ' ', sanitized).strip()
-        sanitized = sanitized.rstrip('.-_ ')
-        
-        # Ensure the result is not empty
-        if not sanitized:
-            sanitized = "unnamed_file"
-        
-        # Step 2: Check if truncation and hashing are needed
-        if len(sanitized) > self.max_stem_length:
+        # Log if truncation occurred
+        if len(result) < original_length:
             self._log(log_callback, 
-                     f"Filename '{sanitized[:30]}...' exceeds safe length and will be shortened "
+                     f"Filename '{filename[:30]}...' exceeds safe length and will be shortened "
                      f"to prevent path errors.")
-            
-            # Generate deterministic hash from original filename to ensure uniqueness
-            hash_suffix = hashlib.sha1(filename.encode('utf-8')).hexdigest()[:8]
-            
-            # Calculate prefix length to fit within our limit
-            prefix_length = self.max_stem_length - len(hash_suffix) - 1  # -1 for underscore
-            prefix_length = max(1, prefix_length)  # Ensure at least 1 character for prefix
-            
-            # Truncate and combine with hash
-            truncated_prefix = sanitized[:prefix_length].rstrip('.-_ ')
-            if not truncated_prefix:  # Fallback if prefix becomes empty
-                truncated_prefix = "file"
-            
-            result = f"{truncated_prefix}_{hash_suffix}"
             self._log(log_callback, f"Shortened filename: '{result}'")
-            return result
         
-        return sanitized
+        return result
 
     def set_model_and_provider(self, model: str, provider: str) -> bool:
         """
@@ -158,7 +113,13 @@ class WhisperTranscriber:
                    actual_start: int, 
                    duration: int,
                    cleanup_tmp: bool = True,
-                   log_callback: Optional[Callable[[str], None]] = None) -> Optional[dict]:
+                   log_callback: Optional[Callable[[str], None]] = None,
+                   perturbation_seed: Optional[int] = None,
+                   needs_transcoding: bool = False,
+                   target_bitrate: int = 128000,
+                   output_format: Optional[str] = None,
+                   preserve_audio_clips: bool = False,
+                   dry_run: bool = False) -> Optional[dict]:
         """
         Transcribe an audio segment using OpenAI's Whisper API.
         
@@ -169,6 +130,12 @@ class WhisperTranscriber:
             duration: Duration to transcribe in seconds
             cleanup_tmp: Whether to remove temporary files after transcription
             log_callback: Optional callback function for logging
+            perturbation_seed: Optional seed for audio perturbation to bypass caching
+            needs_transcoding: Whether transcoding is needed (determined by time_slicer)
+            target_bitrate: Target bitrate in bps for transcoding (default 128000 = 128kbps)
+            output_format: Output format when transcoding (e.g., 'm4a'). None means keep original.
+            preserve_audio_clips: Whether to preserve the cut audio clip in the result directory.
+            dry_run: If True, skip the API call and return a dummy result.
             
         Returns:
             dict: Transcription result from Whisper API
@@ -183,29 +150,75 @@ class WhisperTranscriber:
             # Prepare file paths
             input_path = Path(input_file).resolve()
             file_stem = input_path.stem
-            output_format = self._get_output_format(input_path)
+            
+            # Determine output format
+            if output_format is None:
+                # Keep original format
+                output_ext = self._get_output_format(input_path)
+            else:
+                # Use specified format (e.g., 'm4a' for transcoding)
+                output_ext = output_format
             
             # Sanitize filenames to avoid path length issues
             safe_file_stem = self._sanitize_filename(file_stem, log_callback=log_callback)
             
             # Generate unique temporary filename to avoid concurrent conflicts
             # Format: {safe_file_stem}_ss{display_start}-t{duration}_cut.{format}
-            audio_segment = self.tmp_dir / f"{safe_file_stem}_ss{display_start}-t{duration}_cut.{output_format}"
+            audio_segment = self.tmp_dir / f"{safe_file_stem}_ss{display_start}-t{duration}_cut.{output_ext}"
             
             self._log(log_callback, f"Using temporary audio file: {audio_segment}")
             
-            # Cut audio segment using ffmpeg
+            # Cut audio segment using ffmpeg with optional perturbation and transcoding
             self._log(log_callback, "Cutting audio segment...")
+            if needs_transcoding:
+                self._log(log_callback, f"Transcoding audio to {target_bitrate/1000:.0f}kbps...")
             if not self._cut_audio_segment(
                 input_path, audio_segment, actual_start, 
-                duration - (actual_start - display_start), log_callback):
+                duration - (actual_start - display_start), log_callback,
+                perturbation_seed=perturbation_seed,
+                needs_transcoding=needs_transcoding,
+                target_bitrate=target_bitrate):
                 return None
+            
+            # Calculate and log SHA256 if perturbation was applied
+            if perturbation_seed is not None:
+                sha256_hash = self._calculate_sha256(audio_segment)
+                self._log(log_callback, f"Perturbed audio segment created. Seed: {perturbation_seed:04x}, SHA256: {sha256_hash}")
 
             # Prepare output directory and file with sanitized names
             result_dir = self.result_dir / safe_file_stem
             result_dir.mkdir(parents=True, exist_ok=True)
+            
+            # Preserve audio clip if requested
+            if preserve_audio_clips:
+                clips_dir = result_dir / "audio-clips"
+                clips_dir.mkdir(exist_ok=True)
+                # Copy the temporary audio file to the clips directory
+                # Use the same filename as the temporary file
+                clip_path = clips_dir / audio_segment.name
+                shutil.copy2(audio_segment, clip_path)
+                self._log(log_callback, f"Preserved audio clip to: {clip_path}")
+
             result_file = result_dir / f"{audio_segment.stem}_result.json"
             self._log(log_callback, f"Will save result to: {result_file}")
+
+            # Skip API call if dry run
+            if dry_run:
+                self._log(log_callback, "Dry run enabled: Skipping API call.")
+                result = {
+                    "text": "[DRY RUN] Audio processed but not transcribed.",
+                    "segments": [],
+                    "words": [],
+                    "duration": duration
+                }
+                # Save dummy result
+                with open(result_file, 'w', encoding='utf-8') as f:
+                    json.dump(result, f, ensure_ascii=False, indent=2)
+                
+                return {
+                    "result": result,
+                    "result_dir": str(result_dir)
+                }
 
             # Call Whisper API
             self._log(log_callback, "Calling Whisper API...")
@@ -249,18 +262,34 @@ class WhisperTranscriber:
         # For container formats (mp4, flv, etc), extract to m4a
         return 'm4a'
 
+    def _calculate_sha256(self, file_path: Path) -> str:
+        """Calculate SHA256 hash of a file."""
+        sha256_hash = hashlib.sha256()
+        with open(file_path, "rb") as f:
+            for byte_block in iter(lambda: f.read(4096), b""):
+                sha256_hash.update(byte_block)
+        return sha256_hash.hexdigest()
+
     def _cut_audio_segment(self, 
                         input_file: Path, 
                         output_file: Path, 
                         start_time: int, 
                         duration: int,
-                        log_callback: Optional[Callable[[str], None]] = None) -> bool:
-        """Cut audio segment using ffmpeg with format-specific optimizations."""
+                        log_callback: Optional[Callable[[str], None]] = None,
+                        perturbation_seed: Optional[int] = None,
+                        needs_transcoding: bool = False,
+                        target_bitrate: int = 128000) -> bool:
+        """Cut audio segment using ffmpeg with format-specific optimizations, optional perturbation, and transcoding."""
         import ffmpeg
         import subprocess
         try:
             # Base stream with timing
-            stream = ffmpeg.input(str(input_file), ss=start_time, t=duration)
+            if start_time > 0:
+                stream = ffmpeg.input(str(input_file), ss=start_time, t=duration)
+            else:
+                # Don't use ss for the start of the file to avoid skipping initial audio
+                # if video stream starts later than audio stream (input seeking alignment issue)
+                stream = ffmpeg.input(str(input_file), t=duration)
             
             # Get input format
             input_ext = input_file.suffix.lower()
@@ -271,11 +300,32 @@ class WhisperTranscriber:
                 'vn': None,  # No video
             }
             
-            # For lossy sources, use copy codec when format matches
-            if input_ext == output_ext and input_ext in ['.mp3', '.m4a']:
-                output_options['acodec'] = 'copy'
-
-            # TODO: else re-encode to around up to 16khz quality per Whisper architecture.
+            # Check if we need to apply perturbation
+            if perturbation_seed is not None:
+                # Apply perturbation using audio filters
+                # Generate deterministic noise based on seed
+                # The noise level is extremely low (0.0005 = 0.05% of original volume)
+                
+                # Create noise source with same duration and seed
+                # Using anoisesrc filter to generate white noise
+                noise = ffmpeg.input(f"anoisesrc=d={duration}:a=0.0005:r=44100:seed={perturbation_seed}", f='lavfi')
+                
+                # Mix original audio with noise
+                stream = ffmpeg.filter([stream, noise], 'amix', inputs=2, duration='first')
+                
+                # Force re-encoding when perturbation is applied
+                self._log(log_callback, f"Applying audio perturbation with seed: {perturbation_seed:04x}")
+            
+            # Apply transcoding if needed
+            if needs_transcoding:
+                # Transcode to target bitrate
+                output_options['acodec'] = 'aac' if output_ext == '.m4a' else 'libmp3lame'
+                output_options['b:a'] = str(target_bitrate)
+                self._log(log_callback, f"Transcoding audio to {target_bitrate/1000:.0f}kbps")
+            else:
+                # Can copy: use copy codec when format matches
+                if input_ext == output_ext and input_ext in ['.mp3', '.m4a']:
+                    output_options['acodec'] = 'copy'
             
             # Build ffmpeg command
             cmd = (

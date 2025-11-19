@@ -1,13 +1,19 @@
 from PyQt5.QtWidgets import (QFrame, QToolTip, QMenu, QWidgetAction, 
                            QLabel, QPushButton, QLineEdit, QHBoxLayout, 
                            QVBoxLayout, QWidget)
-from PyQt5.QtCore import Qt, QRectF, QEvent
+from PyQt5.QtCore import Qt, QRectF, QEvent, pyqtSignal
 from PyQt5.QtGui import QPainter, QPen, QColor, QFont
 from .draggable_label import DraggableLabel
 from .styles.style_manager import get_segment_bar_combined_stylesheet
 from .slice_manager import SliceManager, SliceStatus
+import random
+from PyQt5.QtWidgets import QCheckBox
+from PyQt5.QtGui import QIcon
 
 class SegmentBar(QFrame):
+    # Add signal to notify parent of perturbation changes
+    perturbation_changed = pyqtSignal(object)  # emits None or int seed
+    
     def __init__(self, parent=None, mode="time_slicer"):
         super().__init__(parent)
         self.setFixedHeight(30)
@@ -27,7 +33,12 @@ class SegmentBar(QFrame):
         
         # For marking slices during hover/transcription
         self.marked_slices = set()  # Set of slice indices to mark with thick border
-
+        self.perturbation_seed = None  # Store current perturbation seed
+        
+        # Transcoding information
+        self.needs_transcoding = False
+        self.target_bitrate = 0
+        
     # def get_hms_editor_stylesheet(self):
     #     return """
     #         QMenu {
@@ -91,8 +102,10 @@ class SegmentBar(QFrame):
     #         }
     #     """
 
-    def set_segments(self, segments):
+    def set_segments(self, segments, needs_transcoding=False, target_bitrate=0):
         self.segments = segments
+        self.needs_transcoding = needs_transcoding
+        self.target_bitrate = target_bitrate
         self.segment_start_offsets = [start for (start, duration) in segments]
         
         # Update slice manager
@@ -226,6 +239,10 @@ class SegmentBar(QFrame):
 
             painter.drawRoundedRect(segment_rect, 5, 5)
 
+            # Draw serrated edges if transcoding is needed
+            if self.needs_transcoding:
+                self._draw_serrated_edges(painter, segment_rect)
+
             # Draw start delimiter line if the actual transcribe start time is altered.
             offset_seconds = self.segment_start_offsets[i]
             if offset_seconds > start and self.is_valid_segment_time(i, offset_seconds):
@@ -278,6 +295,45 @@ class SegmentBar(QFrame):
             "error": "#FF0000"  # Red
         }
         return colors.get(status, "#FFFFFF")
+    
+    def _draw_serrated_edges(self, painter, segment_rect):
+        """Draw serrated (sawtooth) edges on top and bottom of segment to indicate transcoding"""
+        # Save current state
+        painter.save()
+        
+        # Use a semi-transparent color that won't completely hide the hover effect
+        painter.setPen(QPen(QColor(80, 80, 80, 180), 1.5))
+        
+        # Calculate serration parameters
+        tooth_width = 4  # pixels
+        tooth_height = 2  # pixels
+        
+        # Draw top serrated edge
+        x = segment_rect.left()
+        y_top = segment_rect.top()
+        teeth_count = int(segment_rect.width() / tooth_width)
+        
+        for i in range(teeth_count):
+            x_start = x + i * tooth_width
+            x_mid = x_start + tooth_width / 2
+            x_end = x_start + tooth_width
+            
+            # Top edge zigzag
+            if i % 2 == 0:
+                painter.drawLine(int(x_start), int(y_top), 
+                               int(x_mid), int(y_top - tooth_height))
+                painter.drawLine(int(x_mid), int(y_top - tooth_height), 
+                               int(x_end), int(y_top))
+            
+            # Bottom edge zigzag
+            y_bottom = segment_rect.bottom()
+            if i % 2 == 0:
+                painter.drawLine(int(x_start), int(y_bottom), 
+                               int(x_mid), int(y_bottom + tooth_height))
+                painter.drawLine(int(x_mid), int(y_bottom + tooth_height), 
+                               int(x_end), int(y_bottom))
+        
+        painter.restore()
 
     def mouseMoveEvent(self, event):
         if not self.segments:
@@ -298,6 +354,9 @@ class SegmentBar(QFrame):
                     tooltip_text += f"\nTranscribe from: {h:02d}:{m:02d}:{s:02d}"
                     status = self.segment_status.get(i, "pending")
                     tooltip_text += f"\nStatus: {status.capitalize()}"
+                # Add transcoding info if applicable
+                if self.needs_transcoding and self.target_bitrate > 0:
+                    tooltip_text += f"\nAudio will be re-encoded to {self.target_bitrate/1000:.0f}kbps"
                 QToolTip.showText(event.globalPos(), tooltip_text)
                 self.update()
                 break
@@ -360,6 +419,7 @@ class SegmentBar(QFrame):
         # Right-Click menu, allowing users to:
         #   Manually edit transcription start time for one segment
         #   Control slice status (reset to idle / select slice)
+        #   Control audio perturbation for cache bypass
         if self.mode != "transcription":
             return
             
@@ -393,6 +453,122 @@ class SegmentBar(QFrame):
             else:
                 action = menu.addAction("Reset to idle")
                 action.triggered.connect(lambda: self.slice_manager.reset_slice_to_idle(current_segment))
+        
+        menu.addSeparator()
+        
+        # Add perturbation control widget
+        perturbation_widget = QWidget()
+        perturbation_widget.setObjectName("perturbation_control")
+        perturbation_layout = QHBoxLayout(perturbation_widget)
+        perturbation_layout.setContentsMargins(10, 5, 10, 5)
+        
+        # Dice button to randomize seed
+        dice_button = QPushButton("🎲")
+        dice_button.setObjectName("dice_button")
+        dice_button.setFixedSize(30, 25)
+        dice_button.setToolTip("Click to generate a new random seed")
+        dice_button.setCursor(Qt.PointingHandCursor)
+        dice_button.setStyleSheet("""
+            QPushButton {
+                background-color: transparent;
+                border: 1px solid #d0d0d0;
+                border-radius: 3px;
+                font-size: 16px;
+            }
+            QPushButton:hover {
+                background-color: #e8e8e8;
+                border-color: #999;
+            }
+            QPushButton:pressed {
+                background-color: #d0d0d0;
+            }
+        """)
+        
+        # Seed display (hex, 4 characters)
+        seed_display = QLineEdit()
+        seed_display.setObjectName("seed_display")
+        seed_display.setFixedWidth(60)
+        seed_display.setAlignment(Qt.AlignCenter)
+        seed_display.setReadOnly(True)
+        seed_display.setStyleSheet("""
+            QLineEdit {
+                background-color: #f0f0f0;
+                border: 1px solid #d0d0d0;
+                border-radius: 3px;
+                padding: 2px;
+                font-family: monospace;
+                font-weight: bold;
+            }
+        """)
+        
+        # Initialize seed display
+        if self.perturbation_seed is not None:
+            seed_display.setText(f"{self.perturbation_seed:04x}")
+        else:
+            seed_display.setText("")
+            seed_display.setPlaceholderText("OFF")
+        
+        # Help icon with tooltip
+        help_label = QLabel("ⓘ")
+        help_label.setObjectName("help_icon")
+        help_label.setToolTip(
+            "Audio Perturbation:\n"
+            "Adds minimal noise to bypass API caching.\n"
+            "• Click 🎲 to enable with random seed\n"
+            "• Empty = disabled (faster processing)\n"
+            "• Seed ensures reproducible results\n"
+            "• SHA256 logged for verification"
+        )
+        help_label.setCursor(Qt.WhatsThisCursor)
+        help_label.setStyleSheet("""
+            QLabel {
+                color: #666;
+                font-size: 16px;
+                padding: 0 5px;
+            }
+            QLabel:hover {
+                color: #333;
+            }
+        """)
+        
+        # Function to generate new seed
+        def generate_new_seed():
+            new_seed = random.randint(0x0000, 0xFFFF)
+            self.perturbation_seed = new_seed
+            seed_display.setText(f"{new_seed:04x}")
+            # Emit signal to notify parent
+            self.perturbation_changed.emit(new_seed)
+        
+        # Function to toggle perturbation
+        def toggle_perturbation():
+            if self.perturbation_seed is None:
+                generate_new_seed()
+            else:
+                # Disable perturbation
+                self.perturbation_seed = None
+                seed_display.setText("")
+                seed_display.setPlaceholderText("OFF")
+                # Emit signal to notify parent
+                self.perturbation_changed.emit(None)
+        
+        # Connect dice button
+        dice_button.clicked.connect(toggle_perturbation)
+        
+        # Add label
+        perturbation_label = QLabel("Perturbation:")
+        perturbation_label.setStyleSheet("color: #333; padding-right: 5px;")
+        
+        # Assemble layout
+        perturbation_layout.addWidget(perturbation_label)
+        perturbation_layout.addWidget(dice_button)
+        perturbation_layout.addWidget(seed_display)
+        perturbation_layout.addWidget(help_label)
+        perturbation_layout.addStretch()
+        
+        # Add to menu
+        perturbation_action = QWidgetAction(menu)
+        perturbation_action.setDefaultWidget(perturbation_widget)
+        menu.addAction(perturbation_action)
         
         menu.addSeparator()
         

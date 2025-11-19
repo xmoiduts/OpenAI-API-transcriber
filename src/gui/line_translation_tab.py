@@ -153,9 +153,9 @@ class LineTranslationPanel(QWidget):
             original_lines = []
             for j, line in enumerate(group):
                 line_num = start_line + j
-                original_lines.append(f"{{L{line_num}}} {line}")
+                original_lines.append(f"{line}")
                 
-            original_text = "\n".join(original_lines)
+            original_text = "".join(original_lines) # todo: larger 行距？
             
             # 添加翻译单元
             self.workspace_panel.translation_units_panel.add_unit(unit_id, original_text)
