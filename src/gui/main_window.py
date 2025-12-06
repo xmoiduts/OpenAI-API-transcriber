@@ -2,7 +2,7 @@ from PyQt5.QtWidgets import QMainWindow, QTabWidget
 from .time_slicer_tab import TimeSlicerTab
 from .transcription_tab import TranscriptionTab
 from .transcription_new_tab import TranscriptionNewTab
-from .merge_paragraph_tab import MergeParagraphTab
+from .ASR_postprocess_tab import ASRPostprocessTab
 from .line_translation_tab import LineTranslationTab
 from .styles.style_manager import get_main_window_stylesheet
 
@@ -19,13 +19,13 @@ class MainWindow(QMainWindow):
         self.time_slicer_tab = TimeSlicerTab()
         self.transcription_tab = TranscriptionTab()
         self.transcription_new_tab = TranscriptionNewTab()
-        self.merge_paragraph_tab = MergeParagraphTab()
+        self.asr_postprocess_tab = ASRPostprocessTab()
         self.line_translation_tab = LineTranslationTab()
 
         self.tab_widget.addTab(self.time_slicer_tab, "Time Slicer")
         self.tab_widget.addTab(self.transcription_tab, "Tr-old")
         self.tab_widget.addTab(self.transcription_new_tab, "Transcription New")
-        self.tab_widget.addTab(self.merge_paragraph_tab, "ASR post process")
+        self.tab_widget.addTab(self.asr_postprocess_tab, "ASR post process")
         self.tab_widget.addTab(self.line_translation_tab, "Line Translation")
 
         self.setStyleSheet(get_main_window_stylesheet())
@@ -41,5 +41,5 @@ class MainWindow(QMainWindow):
         }
         self.transcription_tab.update_from_other_tab(data)
         self.transcription_new_tab.update_from_other_tab(data)
-        self.merge_paragraph_tab.update_from_other_tab(data)
+        self.asr_postprocess_tab.update_from_other_tab(data)
 
