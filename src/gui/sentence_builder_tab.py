@@ -6,13 +6,14 @@ VSCode-like three-panel layout: File Tree | Workspace | AI Chat Sidebar
 from PyQt5.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QFrame, QSplitter,
     QTreeWidget, QTreeWidgetItem, QScrollArea, QLabel,
-    QPlainTextEdit, QPushButton, QComboBox, QSizePolicy
+    QPlainTextEdit, QPushButton, QSizePolicy
 )
 from PyQt5.QtCore import Qt, pyqtSignal
 from PyQt5.QtGui import QFont
 
 from .tab_interface import TabInterface
 from .styles.style_manager import get_sentence_builder_combined_stylesheet
+from .components.model_selector import ModelSelectorWidget
 
 
 class SentenceBuilderTab(TabInterface):
@@ -145,12 +146,33 @@ class WorkspacePanel(QFrame):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
         
-        # Header
-        header = QLabel("Workspace")
-        header.setObjectName("panelHeader")
-        header.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
-        header.setFixedHeight(32)
-        layout.addWidget(header)
+        # Header with audio model selector
+        header_frame = QFrame()
+        header_frame.setObjectName("panelHeader")
+        header_frame.setFixedHeight(40)
+        header_layout = QHBoxLayout(header_frame)
+        header_layout.setContentsMargins(8, 4, 8, 4)
+        header_layout.setSpacing(8)
+        
+        header_label = QLabel("Workspace")
+        header_label.setStyleSheet("color: #e0e0e0; font-weight: bold;")
+        header_layout.addWidget(header_label)
+        
+        header_layout.addStretch()
+        
+        # Audio transcription model selector
+        audio_label = QLabel("ASR Model:")
+        audio_label.setStyleSheet("color: #888888; font-size: 11px;")
+        header_layout.addWidget(audio_label)
+        
+        self.audio_model_selector = ModelSelectorWidget(
+            applicable_task="audio-transcription",
+            max_popup_height=350
+        )
+        self.audio_model_selector.selection_confirmed.connect(self._on_audio_model_selected)
+        header_layout.addWidget(self.audio_model_selector)
+        
+        layout.addWidget(header_frame)
         
         # Blank content area
         content = QFrame()
@@ -163,6 +185,10 @@ class WorkspacePanel(QFrame):
         content_layout.addWidget(placeholder)
         
         layout.addWidget(content)
+    
+    def _on_audio_model_selected(self, model: str, provider: str):
+        """Handle audio model selection."""
+        print(f"[WorkspacePanel] Audio model selected: {model} @ {provider}")
 
 
 class ChatSidebarPanel(QFrame):
@@ -355,15 +381,12 @@ class ChatControlBar(QFrame):
         layout.setContentsMargins(8, 8, 8, 8)
         layout.setSpacing(8)
         
-        # Model selector (placeholder)
-        self.model_selector = QComboBox()
-        self.model_selector.setObjectName("modelSelector")
-        self.model_selector.addItem("Select model...")
-        self.model_selector.addItem("gpt-4o")
-        self.model_selector.addItem("gpt-4o-mini")
-        self.model_selector.addItem("claude-3-opus")
-        self.model_selector.setEnabled(False)  # Disabled placeholder
-        self.model_selector.setMinimumWidth(140)
+        # Text chat model selector (replaces old QComboBox placeholder)
+        self.model_selector = ModelSelectorWidget(
+            applicable_task="text-chat",
+            max_popup_height=400
+        )
+        self.model_selector.selection_confirmed.connect(self._on_model_selected)
         layout.addWidget(self.model_selector)
         
         layout.addStretch()
@@ -374,6 +397,10 @@ class ChatControlBar(QFrame):
         self.action_button.setMinimumWidth(80)
         self.action_button.clicked.connect(self._on_action_click)
         layout.addWidget(self.action_button)
+    
+    def _on_model_selected(self, model: str, provider: str):
+        """Handle model selection."""
+        print(f"[ChatControlBar] Text model selected: {model} @ {provider}")
         
     def _on_action_click(self):
         """Handle action button click."""

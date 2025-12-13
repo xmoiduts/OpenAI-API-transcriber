@@ -27,7 +27,7 @@ The tool provides a graphical interface for slicing media files and managing tra
 
 - Python 3.x
 - PyQt5
-- FFmpeg
+- `ffmpeg-python`
 - OpenAI API key
 
 ## Installation
