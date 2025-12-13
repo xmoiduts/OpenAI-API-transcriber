@@ -16,6 +16,7 @@ from src.asr_postprocess.core import (
     merge_text_to_txt,
     convert_raw_json_to_csv,
     convert_merged_json_to_csv,
+    convert_merged_json_to_delta_csv,
 )
 
 
@@ -101,13 +102,10 @@ class ASRPostprocessTab(TabInterface):
         layout.addWidget(mode3_subtitle)
         
         button_layout_3 = QHBoxLayout()
-        self.mode3_placeholder_btn1 = QPushButton("(Placeholder) Convert to Delta Format")
-        self.mode3_placeholder_btn1.setEnabled(False)
-        self.mode3_placeholder_btn2 = QPushButton("(Placeholder) Export Delta CSV")
-        self.mode3_placeholder_btn2.setEnabled(False)
+        self.convert_to_delta_csv_button = QPushButton("Convert Merged JSON to Delta CSV")
+        self.convert_to_delta_csv_button.clicked.connect(self.on_convert_merged_json_to_delta_csv)
         
-        button_layout_3.addWidget(self.mode3_placeholder_btn1)
-        button_layout_3.addWidget(self.mode3_placeholder_btn2)
+        button_layout_3.addWidget(self.convert_to_delta_csv_button)
         layout.addLayout(button_layout_3)
         
         layout.addStretch()
@@ -236,6 +234,20 @@ class ASRPostprocessTab(TabInterface):
 
         try:
             output_file = convert_merged_json_to_csv(self.target_directory)
+            show_flying_message(self, f"Successfully saved to {output_file}")
+        except Exception as e:
+            show_flying_message(self, f"Error: {e}")
+            import traceback
+            traceback.print_exc()
+
+    def on_convert_merged_json_to_delta_csv(self):
+        """Handler for 'Convert Merged JSON to Delta CSV' button (Mode 3)."""
+        if not self.target_directory:
+            show_flying_message(self, "Please load a directory first.")
+            return
+
+        try:
+            output_file = convert_merged_json_to_delta_csv(self.target_directory)
             show_flying_message(self, f"Successfully saved to {output_file}")
         except Exception as e:
             show_flying_message(self, f"Error: {e}")

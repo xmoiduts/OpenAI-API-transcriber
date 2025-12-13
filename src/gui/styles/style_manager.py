@@ -380,6 +380,236 @@ def get_line_translation_combined_stylesheet():
         get_drop_zone_stylesheet()
     )
 
+def get_chat_sidebar_stylesheet():
+    """Styles for the AI chat sidebar in Sentence Builder tab (Light theme)."""
+    return """
+        /* Panel headers */
+        QLabel#panelHeader {
+            background-color: #f3f3f3;
+            color: #333333;
+            font-size: 12px;
+            font-weight: bold;
+            padding-left: 12px;
+            border-bottom: 1px solid #e0e0e0;
+        }
+        
+        /* File tree panel */
+        QFrame#fileTreePanel {
+            background-color: #f7f7f7;
+            border-right: 1px solid #e0e0e0;
+        }
+        
+        QTreeWidget#fileTree {
+            background-color: #f7f7f7;
+            color: #333333;
+            border: none;
+            font-size: 13px;
+            outline: none;
+        }
+        
+        QTreeWidget#fileTree::item {
+            padding: 4px 8px;
+            border: none;
+        }
+        
+        QTreeWidget#fileTree::item:hover {
+            background-color: #e8e8e8;
+        }
+        
+        QTreeWidget#fileTree::item:selected {
+            background-color: #cce5ff;
+            color: #0066cc;
+        }
+        
+        QTreeWidget#fileTree::branch {
+            background-color: #f7f7f7;
+        }
+        
+        /* Workspace panel */
+        QFrame#workspacePanel {
+            background-color: #ffffff;
+            border-right: 1px solid #e0e0e0;
+        }
+        
+        QFrame#workspaceContent {
+            background-color: #ffffff;
+        }
+        
+        QLabel#workspacePlaceholder {
+            color: #999999;
+            font-size: 14px;
+            font-style: italic;
+        }
+        
+        /* Chat sidebar panel */
+        QFrame#chatSidebarPanel {
+            background-color: #fafafa;
+        }
+        
+        /* Chat history */
+        QScrollArea#chatHistory {
+            background-color: #fafafa;
+            border: none;
+        }
+        
+        QWidget#chatHistoryContainer {
+            background-color: #fafafa;
+        }
+        
+        /* Chat message cards */
+        QFrame#chatMessage_user {
+            background-color: #e3f2fd;
+            border-radius: 8px;
+            border-left: 3px solid #1976d2;
+        }
+        
+        QFrame#chatMessage_assistant {
+            background-color: #ffffff;
+            border-radius: 8px;
+            border-left: 3px solid #43a047;
+            border: 1px solid #e8e8e8;
+            border-left: 3px solid #43a047;
+        }
+        
+        QLabel#messageRole {
+            color: #666666;
+            font-size: 11px;
+        }
+        
+        QFrame#chatMessage_user QLabel#messageRole {
+            color: #1976d2;
+        }
+        
+        QFrame#chatMessage_assistant QLabel#messageRole {
+            color: #43a047;
+        }
+        
+        QLabel#messageContent {
+            color: #333333;
+            font-size: 13px;
+            line-height: 1.4;
+        }
+        
+        /* Chat input widget */
+        QFrame#chatInputWidget {
+            background-color: #f3f3f3;
+            border-top: 1px solid #e0e0e0;
+        }
+        
+        QPlainTextEdit#chatInput {
+            background-color: #ffffff;
+            color: #333333;
+            border: 1px solid #d0d0d0;
+            border-radius: 6px;
+            padding: 8px;
+            font-size: 13px;
+            selection-background-color: #b3d9ff;
+        }
+        
+        QPlainTextEdit#chatInput:focus {
+            border: 1px solid #1976d2;
+        }
+        
+        /* Chat control bar */
+        QFrame#chatControlBar {
+            background-color: #f3f3f3;
+            border-top: 1px solid #e0e0e0;
+        }
+        
+        QComboBox#modelSelector {
+            background-color: #ffffff;
+            color: #666666;
+            border: 1px solid #d0d0d0;
+            border-radius: 4px;
+            padding: 6px 10px;
+            font-size: 12px;
+        }
+        
+        QComboBox#modelSelector:disabled {
+            background-color: #f0f0f0;
+            color: #999999;
+        }
+        
+        QPushButton#sendButton {
+            background-color: #1976d2;
+            color: white;
+            border: none;
+            border-radius: 4px;
+            padding: 8px 16px;
+            font-size: 13px;
+            font-weight: bold;
+        }
+        
+        QPushButton#sendButton:hover {
+            background-color: #1e88e5;
+        }
+        
+        QPushButton#sendButton:pressed {
+            background-color: #1565c0;
+        }
+        
+        QPushButton#stopButton {
+            background-color: #d32f2f;
+            color: white;
+            border: none;
+            border-radius: 4px;
+            padding: 8px 16px;
+            font-size: 13px;
+            font-weight: bold;
+        }
+        
+        QPushButton#stopButton:hover {
+            background-color: #e53935;
+        }
+        
+        /* Splitter handle */
+        QSplitter::handle {
+            background-color: #e0e0e0;
+            width: 1px;
+        }
+        
+        QSplitter::handle:hover {
+            background-color: #1976d2;
+        }
+        
+        /* Scrollbar styling for light theme */
+        QScrollArea#chatHistory QScrollBar:vertical {
+            background-color: #fafafa;
+            width: 10px;
+            margin: 0px;
+        }
+        
+        QScrollArea#chatHistory QScrollBar::handle:vertical {
+            background-color: #c0c0c0;
+            min-height: 20px;
+            border-radius: 5px;
+            margin: 2px;
+        }
+        
+        QScrollArea#chatHistory QScrollBar::handle:vertical:hover {
+            background-color: #a0a0a0;
+        }
+        
+        QScrollArea#chatHistory QScrollBar::add-line:vertical,
+        QScrollArea#chatHistory QScrollBar::sub-line:vertical {
+            height: 0px;
+        }
+        
+        QScrollArea#chatHistory QScrollBar::add-page:vertical,
+        QScrollArea#chatHistory QScrollBar::sub-page:vertical {
+            background: none;
+        }
+    """
+
+
+def get_sentence_builder_combined_stylesheet():
+    """
+    Combined stylesheet for Sentence Builder tab.
+    Uses dark theme to match VSCode/Cursor aesthetic.
+    """
+    return get_chat_sidebar_stylesheet()
+
+
 def get_complete_stylesheet():
     """
     获取完整的应用样式表

@@ -11,6 +11,7 @@ from .core import (
     merge_text_to_txt,
     convert_raw_json_to_csv,
     convert_merged_json_to_csv,
+    convert_merged_json_to_delta_csv,
 )
 from .utils import (
     find_cut_result_json_files,
@@ -21,6 +22,7 @@ __all__ = [
     'merge_text_to_txt',
     'convert_raw_json_to_csv',
     'convert_merged_json_to_csv',
+    'convert_merged_json_to_delta_csv',
     'find_cut_result_json_files',
     'extract_start_time',
 ]
