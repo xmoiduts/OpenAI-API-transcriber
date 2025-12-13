@@ -185,21 +185,41 @@ def merge_words(
             ))
         
         try:
-            stop_char = data["words"][idx_word+1]["word"][0]
+            next_word = data["words"][idx_word+1]
+            next_word_start = next_word["start"]
+            stop_char = next_word["word"][0]
             idx_punc += len(word["word"])
             
             while punctuated_text[idx_punc] != stop_char:
-                # Punctuation uses the same timestamp as the previous word
-                punc_start = round_timestamp(word_start)
-                punc_end = round_timestamp(word_end)
-                if should_include:
-                    # Store punctuation as (start, end, char, "punctuation")
-                    merged_data["words"].append((
-                        punc_start, 
-                        punc_end, 
-                        punctuated_text[idx_punc], 
-                        "punctuation"
-                    ))
+                char = punctuated_text[idx_punc]
+                
+                if char.isspace():
+                    # Whitespace represents the gap between words:
+                    # - starts at previous word's END
+                    # - ends at next word's START
+                    # This gives the actual pause duration, useful for semantic segmentation
+                    # (longer pauses often indicate sentence/clause boundaries)
+                    space_start = round_timestamp(word_end)
+                    space_end = round_timestamp(next_word_start)
+                    if should_include:
+                        merged_data["words"].append((
+                            space_start,
+                            space_end,
+                            char,
+                            "punctuation"
+                        ))
+                else:
+                    # Non-space punctuation uses the same timestamp as the previous word
+                    punc_start = round_timestamp(word_start)
+                    punc_end = round_timestamp(word_end)
+                    if should_include:
+                        # Store punctuation as (start, end, char, "punctuation")
+                        merged_data["words"].append((
+                            punc_start, 
+                            punc_end, 
+                            char, 
+                            "punctuation"
+                        ))
                 idx_punc += 1
         except IndexError:
             pass
