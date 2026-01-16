@@ -18,12 +18,14 @@ from src.asr_postprocess.core import (
     convert_merged_json_to_csv,
     convert_merged_json_to_delta_csv,
 )
+from src.scripts.generate_subtitles import generate_subtitles
 
 
 class ASRPostprocessTab(TabInterface):
     def __init__(self):
         super().__init__("ASR post process")
         self.target_directory = ""
+        self.pending_directory = "" # path notified by other tabs, but may not exist yet
         self.init_ui()
         self.setAcceptDrops(True)
         # Combine stylesheets
@@ -44,9 +46,20 @@ class ASRPostprocessTab(TabInterface):
         self.drop_zone.setMinimumHeight(100)
         layout.addWidget(self.drop_zone)
 
+        path_layout = QHBoxLayout()
+
         self.loaded_path_label = QLabel("Loaded path: ")
         self.loaded_path_label.setWordWrap(True)
-        layout.addWidget(self.loaded_path_label)
+        path_layout.addWidget(self.loaded_path_label)
+
+        # Refresh button
+        self.refresh_button = QPushButton("↻")
+        self.refresh_button.setFixedSize(100, 30)
+        self.refresh_button.setToolTip("Reload pending directory")
+        self.refresh_button.clicked.connect(self.check_pending_directory)
+        path_layout.addWidget(self.refresh_button, 0, Qt.AlignTop)
+
+        layout.addLayout(path_layout)
 
         # Mode 1: no-timestamp postprocessing
         mode1_title = QLabel("Mode 1: no-timestamp postprocessing")
@@ -108,6 +121,26 @@ class ASRPostprocessTab(TabInterface):
         button_layout_3.addWidget(self.convert_to_delta_csv_button)
         layout.addLayout(button_layout_3)
         
+        # Separator line
+        separator3 = QFrame()
+        separator3.setFrameShape(QFrame.HLine)
+        separator3.setFrameShadow(QFrame.Sunken)
+        layout.addWidget(separator3)
+        
+        # Mode 4: bilingual srt
+        mode4_title = QLabel("Mode 4: bilingual srt")
+        mode4_title.setStyleSheet("font-weight: bold; font-size: 14px; margin-top: 10px;")
+        layout.addWidget(mode4_title)
+        
+        button_layout_4 = QHBoxLayout()
+        self.make_bilingual_srt_button = QPushButton("make bilingual srt")
+        self.make_bilingual_srt_button.clicked.connect(self.on_make_bilingual_srt)
+        
+        button_layout_4.addStretch()
+        button_layout_4.addWidget(self.make_bilingual_srt_button)
+        button_layout_4.addStretch()
+        layout.addLayout(button_layout_4)
+        
         layout.addStretch()
 
     def _sanitize_filename(self, filename: str) -> str:
@@ -136,16 +169,31 @@ class ASRPostprocessTab(TabInterface):
             # The transcription results are stored in result_dir/safe_file_stem/
             transcription_dir = result_dir / safe_file_stem
             
-            if transcription_dir.exists():
-                self.target_directory = str(transcription_dir)
-                display_path = add_zero_wide_char_to_str(self.target_directory)
-                self.loaded_path_label.setText(f"Loaded path: {display_path}")
-                self.drop_zone.setText(f"Auto-loaded: {safe_file_stem} transcription results")
-                show_flying_message(self, f"Auto-loaded transcription directory: {transcription_dir}")
-            else:
-                self.loaded_path_label.setText(f"Transcription directory not found: {add_zero_wide_char_to_str(str(transcription_dir))}\n\nDrag any file from the folder to load it")
-                self.drop_zone.setText("Directory not found - drag any file to load its folder")
-                show_flying_message(self, f"Transcription directory does not exist: {transcription_dir}")
+            self.pending_directory = str(transcription_dir)
+            self.check_pending_directory()
+
+    def check_pending_directory(self):
+        """Check if the pending directory exists and load it if so."""
+        if not self.pending_directory:
+            return
+
+        transcription_dir = Path(self.pending_directory)
+        if transcription_dir.exists():
+            self.target_directory = str(transcription_dir)
+            display_path = add_zero_wide_char_to_str(self.target_directory)
+            self.loaded_path_label.setText(f"Loaded path: {display_path}")
+            self.drop_zone.setText(f"Auto-loaded: {transcription_dir.name} transcription results")
+            show_flying_message(self, f"Auto-loaded transcription directory: {transcription_dir}")
+        else:
+            self.loaded_path_label.setText(f"Transcription directory not found: {add_zero_wide_char_to_str(str(transcription_dir))}\n\nDrag any file from the folder to load it")
+            self.drop_zone.setText("Directory not found - drag any file to load its folder")
+            # show_flying_message(self, f"Transcription directory does not exist: {transcription_dir}")
+
+    def showEvent(self, event):
+        """Called when the tab becomes visible."""
+        super().showEvent(event)
+        if not self.target_directory:
+            self.check_pending_directory()
 
     def dragEnterEvent(self, event):
         if event.mimeData().hasUrls():
@@ -254,3 +302,24 @@ class ASRPostprocessTab(TabInterface):
             import traceback
             traceback.print_exc()
 
+    def on_make_bilingual_srt(self):
+        """Handler for 'make bilingual srt' button."""
+        if not self.target_directory:
+            show_flying_message(self, "Please load a directory first.")
+            return
+
+        orig_path = os.path.join(self.target_directory, "句轴原文.txt")
+        trans_path = os.path.join(self.target_directory, "句轴译文.txt")
+        output_path = os.path.join(self.target_directory, "subtitles-bilang.srt")
+
+        if not os.path.exists(orig_path) or not os.path.exists(trans_path):
+             show_flying_message(self, "Error: '句轴原文.txt' or '句轴译文.txt' not found in loaded directory.")
+             return
+        
+        try:
+            generate_subtitles(orig_path, trans_path, output_path)
+            show_flying_message(self, f"Successfully generated: {output_path}")
+        except Exception as e:
+            show_flying_message(self, f"Error: {e}")
+            import traceback
+            traceback.print_exc()

@@ -1,8 +1,6 @@
 import re
 import os
 
-### WARNING: just put here, will need adaption before it actually take effect.
-
 def sec_to_srt(seconds):
     """Convert seconds to SRT timestamp format HH:MM:SS,mmm"""
     seconds = float(seconds)
@@ -103,8 +101,8 @@ def generate_subtitles(orig_path, trans_path, output_path):
         
         # Clean up empty translation lines
         block = f"{counter}\n{sec_to_srt(start)} --> {sec_to_srt(end)}\n"
-        if text_trans:
-            block += f"{text_trans}\n"
+        # Always maintain bilingual format: translation line (even if empty) + original line
+        block += f"{text_trans}\n"
         block += f"{text_orig}\n\n"
         
         subtitles.append(block)
@@ -118,8 +116,8 @@ def generate_subtitles(orig_path, trans_path, output_path):
 
 if __name__ == "__main__":
     # Input files
-    file_orig = "sentence_timestamp_original.txt"
-    file_trans = "sentence_timestamp_translated.txt"
+    file_orig = "句轴原文.txt"
+    file_trans = "句轴译文.txt"
     # Output file
     file_out = "whisper-transcribed-subtitles.srt"
     

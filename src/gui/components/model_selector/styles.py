@@ -34,3 +34,6 @@ class ModelSelectorColors:
     TEXT_SECONDARY = "#666666"   # Medium Gray
     TEXT_STARRED = "#f5a623"     # Orange (for Starred items)
 
+
+
+
