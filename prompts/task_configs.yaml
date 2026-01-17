@@ -1,0 +1,18 @@
+# Task Configuration for One-Click Actions
+# This file defines tasks that can be executed from the GUI.
+
+tasks:
+  # Example: Translation Task
+  # - id: translate_jp_zh
+  #   name: "Japanese to Chinese (v1)"
+  #   category: translate
+  #   prompt_file: translate/jp_to_zh_basic.md
+  #   default_model: gpt-4o
+  #   description: "Basic translation for general content"
+
+  # Example: Sentence Reconstruction
+  # - id: rebuild_messy_asr
+  #   name: "Fix Broken Sentences"
+  #   category: sentence-rebuild
+  #   prompt_file: sentence-rebuild/fix_asr_v2.md
+  #   description: "Recombines split sentences from ASR"
