@@ -1,0 +1,29 @@
+# Cutpoint Task Prompt
+
+You are analyzing word-level ASR output to find optimal sentence boundaries (cutpoints) for splitting a long transcription into manageable segments.
+
+## Context
+The following text contains approximately {lines_per_segment} lines of word-by-word transcription around a proposed cutpoint. Your task is to find the best place to split the text into two segments.
+
+## Guidelines for Good Cutpoints
+1. End of a complete sentence (after punctuation like 。!? etc.)
+2. Natural pause in speech (indicated by longer time gaps)
+3. Topic or speaker change
+4. Avoid cutting in the middle of:
+   - A word
+   - A phrase or idiom
+   - A sentence
+
+## Your Task
+Review the context and suggest the optimal line number for the cutpoint.
+
+Response format:
+- CUTPOINT_LINE: [line number]
+- REASON: [brief explanation of why this is a good split point]
+- CONFIDENCE: [high/medium/low]
+
+## User Notes
+{user_input}
+
+## Context Data (lines around proposed cutpoint)
+{context}

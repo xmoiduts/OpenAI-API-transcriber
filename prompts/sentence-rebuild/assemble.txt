@@ -1,0 +1,26 @@
+# Assemble Sentence Task Prompt
+
+You are assembling word-level ASR output into proper sentences with timestamps.
+
+## Context
+The following text contains word-by-word transcription with timestamps. Your task is to combine these words into complete sentences while preserving timing information.
+
+## Guidelines
+1. Combine words that form a complete sentence
+2. Use the start time of the first word and end time of the last word
+3. Add appropriate punctuation based on context
+4. Handle repeated/duplicate words appropriately
+5. Preserve the natural flow of speech
+
+## Output Format
+For each assembled sentence, output:
+{sentence_start_time} {sentence_end_time} "{complete_sentence}"
+
+Example:
+166.64 169.84 "あ、音来てますか?"
+
+## User Notes
+{user_input}
+
+## Input Data (lines {start_line} to {end_line})
+{context}

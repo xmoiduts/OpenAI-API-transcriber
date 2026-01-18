@@ -1,8 +1,14 @@
 """
 Sentence Builder Tab - AI-assisted sentence building from word-timestamp ASR results.
-VSCode-like three-panel layout: File Tree | Workspace | AI Chat Sidebar
+VSCode-like three-panel layout: File Tree | Workspace | Task Cards Sidebar
 
-Now integrated with ChatCore for multi-vendor LLM support (OpenAI, Claude, Gemini).
+Layout:
+- Left: File Tree Panel (existing)
+- Middle: Workspace Panel (blank, reserved for Scintilla)
+- Right: Task Cards Panel (replaces original Chat Sidebar)
+
+Note: Original Chat Sidebar code is preserved in:
+    src/gui/components/chat_sidebar_backup.py
 """
 
 from PyQt5.QtWidgets import (
@@ -10,22 +16,30 @@ from PyQt5.QtWidgets import (
     QTreeWidget, QTreeWidgetItem, QScrollArea, QLabel,
     QPlainTextEdit, QPushButton, QSizePolicy, QApplication
 )
-from PyQt5.QtCore import Qt, pyqtSignal, QThread, QTimer
+from PyQt5.QtCore import Qt, pyqtSignal, QEvent
 from PyQt5.QtGui import QFont
+from pathlib import Path
+import sys
 
 from .tab_interface import TabInterface
 from .styles.style_manager import get_sentence_builder_combined_stylesheet
 from .components.model_selector import ModelSelectorWidget
+from .components.task_card import DeduplicateCard, CutpointCard, AssembleCard
+from .components.task_popup_window import TaskPopupWindow
+from .flying_message import show_flying_message
 
-# Import ChatCore
-import sys
-from pathlib import Path
 # Add src to path for imports
 src_path = Path(__file__).parent.parent
 if str(src_path) not in sys.path:
     sys.path.insert(0, str(src_path))
 
 from chatbot_core import ChatCore
+from sentence_builder.reverse_dedup import (
+    find_reverse_duplicates, 
+    get_duplicate_contexts,
+    find_latest_transcription_result,
+    parse_word_timestamps
+)
 
 
 class SentenceBuilderTab(TabInterface):
@@ -49,15 +63,15 @@ class SentenceBuilderTab(TabInterface):
         self.file_tree_panel.setMaximumWidth(350)
         self.splitter.addWidget(self.file_tree_panel)
         
-        # Middle: Workspace Panel (blank)
+        # Middle: Workspace Panel (blank, reserved for Scintilla)
         self.workspace_panel = WorkspacePanel()
         self.splitter.addWidget(self.workspace_panel)
         
-        # Right: Chat Sidebar Panel
-        self.chat_sidebar = ChatSidebarPanel()
-        self.chat_sidebar.setMinimumWidth(300)
-        self.chat_sidebar.setMaximumWidth(500)
-        self.splitter.addWidget(self.chat_sidebar)
+        # Right: Task Cards Sidebar Panel (replaces Chat Sidebar)
+        self.task_cards_panel = TaskCardsSidebarPanel()
+        self.task_cards_panel.setMinimumWidth(300)
+        self.task_cards_panel.setMaximumWidth(500)
+        self.splitter.addWidget(self.task_cards_panel)
         
         # Set initial sizes (left: 200, middle: stretch, right: 380)
         self.splitter.setSizes([200, 500, 380])
@@ -146,7 +160,7 @@ class FileTreePanel(QFrame):
 
 
 class WorkspacePanel(QFrame):
-    """Middle panel: Blank workspace placeholder."""
+    """Middle panel: Blank workspace placeholder (reserved for Scintilla)."""
     
     def __init__(self):
         super().__init__()
@@ -191,7 +205,7 @@ class WorkspacePanel(QFrame):
         content.setObjectName("workspaceContent")
         content_layout = QVBoxLayout(content)
         
-        placeholder = QLabel("Select a file to begin")
+        placeholder = QLabel("Select a file to begin\n\n(Reserved for Scintilla editor)")
         placeholder.setObjectName("workspacePlaceholder")
         placeholder.setAlignment(Qt.AlignCenter)
         content_layout.addWidget(placeholder)
@@ -203,64 +217,55 @@ class WorkspacePanel(QFrame):
         print(f"[WorkspacePanel] Audio model selected: {model} @ {provider}")
 
 
-class ChatWorker(QThread):
-    """Worker thread for async chat operations."""
+class TaskCardsSidebarPanel(QFrame):
+    """Right panel: Scrollable task cards with model selector at bottom.
     
-    chunk_received = pyqtSignal(str)
-    response_complete = pyqtSignal(str)
-    error_occurred = pyqtSignal(str)
-    
-    def __init__(self, chat_core: ChatCore, message: str):
-        super().__init__()
-        self.chat_core = chat_core
-        self.message = message
-        self._stop_requested = False
-    
-    def run(self):
-        """Execute chat request in background thread."""
-        try:
-            full_response = ""
-            
-            # Use streaming
-            gen = self.chat_core.send_stream(self.message)
-            
-            try:
-                while not self._stop_requested:
-                    chunk = next(gen)
-                    full_response += chunk
-                    self.chunk_received.emit(chunk)
-            except StopIteration as e:
-                # Generator finished, e.value contains the return value
-                if e.value:
-                    full_response = e.value
-            
-            if not self._stop_requested:
-                self.response_complete.emit(full_response)
-                
-        except Exception as e:
-            self.error_occurred.emit(str(e))
-    
-    def request_stop(self):
-        """Request the worker to stop."""
-        self._stop_requested = True
-
-
-class ChatSidebarPanel(QFrame):
-    """Right panel: AI chat sidebar (Cursor-like)."""
+    Replaces the original ChatSidebarPanel.
+    """
     
     def __init__(self):
         super().__init__()
+        # Reuse existing SentenceBuilder/Chat sidebar styling (light theme + nice scrollbar)
         self.setObjectName("chatSidebarPanel")
         
-        # Initialize ChatCore
+        # ChatCore instance shared by all tasks
         self.chat_core = ChatCore(
-            system_prompt="You are a helpful assistant."
+            system_prompt="You are an expert at analyzing ASR transcription output and assembling coherent sentences."
         )
         
-        self._current_worker: ChatWorker = None
-        self._streaming_card: StreamingMessageCard = None
+        # Track current transcription directory
+        self._current_result_dir: Path = None
+        self._word_timestamps_file: Path = None
+        self._total_lines: int = 0
+        
+        # Track popup windows
+        self._popup_windows: list = []
         
         self.init_ui()
+        
+        # Auto-detect transcription result on load
+        self._auto_detect_result()
+
+    def _create_isolated_chat_core(self) -> ChatCore:
+        """
+        Create a new ChatCore instance for a single task window.
+
+        Rationale:
+        - Avoid sharing a single ChatCore/ChatThread across multiple concurrent
+          TaskPopupWindow workers (which can cause request/stream mix-ups).
+        - Keep each task's prompt/history isolated so the LLM responds to the
+          correct slice context.
+        """
+        system_prompt = self.chat_core.get_system_prompt()
+        isolated = ChatCore(system_prompt=system_prompt)
+
+        # Mirror the currently selected model/provider.
+        model = self.chat_core.get_current_model()
+        provider = self.chat_core.get_current_provider()
+        if model and provider:
+            isolated.set_model(model, provider)
+
+        return isolated
         
     def init_ui(self):
         layout = QVBoxLayout(self)
@@ -268,344 +273,337 @@ class ChatSidebarPanel(QFrame):
         layout.setSpacing(0)
         
         # Header
-        header = QLabel("AI Assistant")
+        header = QLabel("Task Cards")
         header.setObjectName("panelHeader")
         header.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
         header.setFixedHeight(32)
         layout.addWidget(header)
         
-        # Chat history (scrollable)
-        self.chat_history = ChatHistoryWidget()
-        layout.addWidget(self.chat_history, 1)  # stretch factor 1
+        # Status label
+        self.status_label = QLabel("Auto-detecting transcription results...")
+        self.status_label.setObjectName("statusLabel")
+        self.status_label.setWordWrap(True)
+        # Keep this light; avoid hardcoding dark backgrounds here.
+        self.status_label.setStyleSheet("color: #666666; font-size: 10px; padding: 4px 8px;")
+        layout.addWidget(self.status_label)
         
-        # Chat input area
-        self.chat_input = ChatInputWidget()
-        layout.addWidget(self.chat_input)
+        # Scrollable card area
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        # Reuse chatHistory scrollbar + background styles from get_sentence_builder_combined_stylesheet()
+        scroll.setObjectName("chatHistory")
         
-        # Control bar (model selector + send button)
-        self.control_bar = ChatControlBar()
-        layout.addWidget(self.control_bar)
+        # Card container
+        self.card_container = QWidget()
+        # Reuse chatHistoryContainer background
+        self.card_container.setObjectName("chatHistoryContainer")
+        card_layout = QVBoxLayout(self.card_container)
+        card_layout.setContentsMargins(8, 8, 8, 8)
+        card_layout.setSpacing(12)
         
-        # Connect signals
-        self.control_bar.sendClicked.connect(self._on_send)
-        self.control_bar.stopClicked.connect(self._on_stop)
-        self.control_bar.modelChanged.connect(self._on_model_changed)
+        # Create task cards
+        self.deduplicate_card = DeduplicateCard()
+        self.deduplicate_card.start_clicked.connect(self._on_deduplicate_start)
+        self.deduplicate_card.start_hovered.connect(self._on_start_hover)
+        card_layout.addWidget(self.deduplicate_card)
         
-        # Add welcome message
-        self._add_welcome_message()
+        self.cutpoint_card = CutpointCard()
+        self.cutpoint_card.start_clicked.connect(self._on_cutpoint_start)
+        self.cutpoint_card.start_hovered.connect(self._on_start_hover)
+        card_layout.addWidget(self.cutpoint_card)
         
-    def _add_welcome_message(self):
-        """Add initial welcome message."""
-        self.chat_history.add_message(
-            "assistant",
-            "Hello! I'm your AI assistant for sentence building. "
-            "I can help you merge word-timestamp ASR results into proper sentences.\n\n"
-            "To get started:\n"
-            "1. Select a model from the dropdown below\n"
-            "2. Ask me anything!\n"
-            "3. I support OpenAI, Claude, and Gemini models"
-        )
-    
-    def _on_model_changed(self, model: str, provider: str):
-        """Handle model selection change."""
-        success = self.chat_core.set_model(model, provider)
-        if success:
-            print(f"[ChatSidebar] Model changed to: {model} @ {provider}")
-        else:
-            print(f"[ChatSidebar] Failed to set model: {model} @ {provider}")
+        self.assemble_card = AssembleCard()
+        self.assemble_card.start_clicked.connect(self._on_assemble_start)
+        self.assemble_card.start_hovered.connect(self._on_start_hover)
+        card_layout.addWidget(self.assemble_card)
         
-    def _on_send(self):
-        """Handle send button click."""
-        text = self.chat_input.get_text()
-        if not text.strip():
-            return
+        card_layout.addStretch()
         
-        # Check if model is selected
-        model, provider = self.control_bar.get_current_selection()
-        if not model or not provider:
-            self.chat_history.add_message(
-                "assistant",
-                "⚠️ Please select a model first using the dropdown below."
-            )
-            return
+        scroll.setWidget(self.card_container)
+        layout.addWidget(scroll, 1)  # Stretch factor
         
-        # Ensure model is set in ChatCore
-        if self.chat_core.get_current_model() != model:
-            self.chat_core.set_model(model, provider)
+        # Bottom control bar
+        control_bar = QFrame()
+        # Reuse the existing light control-bar styling
+        control_bar.setObjectName("chatControlBar")
+        control_bar.setFixedHeight(50)
         
-        # Add user message to UI
-        self.chat_history.add_message("user", text)
-        self.chat_input.clear()
+        control_layout = QHBoxLayout(control_bar)
+        control_layout.setContentsMargins(8, 8, 8, 8)
+        control_layout.setSpacing(8)
         
-        # Create streaming message card
-        self._streaming_card = self.chat_history.add_streaming_message()
-        
-        # Start worker thread
-        self.control_bar.set_generating(True)
-        self._current_worker = ChatWorker(self.chat_core, text)
-        self._current_worker.chunk_received.connect(self._on_chunk_received)
-        self._current_worker.response_complete.connect(self._on_response_complete)
-        self._current_worker.error_occurred.connect(self._on_error)
-        self._current_worker.start()
-            
-    def _on_chunk_received(self, chunk: str):
-        """Handle incoming stream chunk."""
-        if self._streaming_card:
-            self._streaming_card.append_content(chunk)
-            # Scroll to bottom
-            self.chat_history.scroll_to_bottom()
-    
-    def _on_response_complete(self, response: str):
-        """Handle response completion."""
-        self.control_bar.set_generating(False)
-        self._streaming_card = None
-        self._current_worker = None
-    
-    def _on_error(self, error_msg: str):
-        """Handle error during chat."""
-        self.control_bar.set_generating(False)
-        
-        # Update streaming card to show error
-        if self._streaming_card:
-            self._streaming_card.set_error(f"Error: {error_msg}")
-        else:
-            self.chat_history.add_message(
-                "assistant",
-                f"❌ Error: {error_msg}"
-            )
-        
-        self._streaming_card = None
-        self._current_worker = None
-            
-    def _on_stop(self):
-        """Handle stop button click."""
-        if self._current_worker:
-            self._current_worker.request_stop()
-            self._current_worker.wait(1000)  # Wait up to 1 second
-            self.control_bar.set_generating(False)
-            
-            if self._streaming_card:
-                self._streaming_card.finalize("(Generation stopped)")
-
-
-class ChatHistoryWidget(QScrollArea):
-    """Scrollable chat history container."""
-    
-    def __init__(self):
-        super().__init__()
-        self.setObjectName("chatHistory")
-        self.setWidgetResizable(True)
-        self.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-        self.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
-        
-        # Container widget
-        self.container = QWidget()
-        self.container.setObjectName("chatHistoryContainer")
-        self.layout = QVBoxLayout(self.container)
-        self.layout.setContentsMargins(8, 8, 8, 8)
-        self.layout.setSpacing(12)
-        self.layout.addStretch()  # Push messages to top
-        
-        self.setWidget(self.container)
-        
-    def add_message(self, role: str, content: str):
-        """Add a message card to the history.
-        
-        Args:
-            role: 'user' or 'assistant'
-            content: Message text
-        """
-        card = ChatMessageCard(role, content)
-        # Insert before the stretch
-        self.layout.insertWidget(self.layout.count() - 1, card)
-        self.scroll_to_bottom()
-        return card
-    
-    def add_streaming_message(self) -> 'StreamingMessageCard':
-        """Add a streaming message card that can be updated."""
-        card = StreamingMessageCard()
-        self.layout.insertWidget(self.layout.count() - 1, card)
-        self.scroll_to_bottom()
-        return card
-    
-    def scroll_to_bottom(self):
-        """Scroll to bottom of chat history."""
-        # Use timer to ensure layout is updated
-        QTimer.singleShot(10, lambda: self.verticalScrollBar().setValue(
-            self.verticalScrollBar().maximum()
-        ))
-        
-    def clear_history(self):
-        """Clear all messages."""
-        while self.layout.count() > 1:  # Keep the stretch
-            item = self.layout.takeAt(0)
-            if item.widget():
-                item.widget().deleteLater()
-
-
-class ChatMessageCard(QFrame):
-    """Individual chat message card."""
-    
-    def __init__(self, role: str, content: str):
-        super().__init__()
-        self.role = role
-        self.setObjectName(f"chatMessage_{role}")
-        self.init_ui(content)
-        
-    def init_ui(self, content: str):
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(12, 10, 12, 10)
-        layout.setSpacing(4)
-        
-        # Role label
-        role_label = QLabel("You" if self.role == "user" else "Assistant")
-        role_label.setObjectName("messageRole")
-        role_label.setFont(QFont("Arial", 9, QFont.Bold))
-        layout.addWidget(role_label)
-        
-        # Content label
-        self.content_label = QLabel(content)
-        self.content_label.setObjectName("messageContent")
-        self.content_label.setWordWrap(True)
-        self.content_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
-        layout.addWidget(self.content_label)
-
-
-class StreamingMessageCard(QFrame):
-    """Message card that supports streaming updates."""
-    
-    def __init__(self):
-        super().__init__()
-        self.setObjectName("chatMessage_assistant")
-        self._content = ""
-        self.init_ui()
-        
-    def init_ui(self):
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(12, 10, 12, 10)
-        layout.setSpacing(4)
-        
-        # Role label
-        role_label = QLabel("Assistant")
-        role_label.setObjectName("messageRole")
-        role_label.setFont(QFont("Arial", 9, QFont.Bold))
-        layout.addWidget(role_label)
-        
-        # Content label
-        self.content_label = QLabel("▍")  # Cursor indicator
-        self.content_label.setObjectName("messageContent")
-        self.content_label.setWordWrap(True)
-        self.content_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
-        layout.addWidget(self.content_label)
-    
-    def append_content(self, chunk: str):
-        """Append content chunk to the message."""
-        self._content += chunk
-        self.content_label.setText(self._content + "▍")
-    
-    def finalize(self, suffix: str = ""):
-        """Finalize the message (remove cursor)."""
-        if suffix:
-            self._content += " " + suffix
-        self.content_label.setText(self._content)
-    
-    def set_error(self, error_msg: str):
-        """Set error state."""
-        self._content = error_msg
-        self.content_label.setText(self._content)
-        self.content_label.setStyleSheet("color: #ff6b6b;")
-
-
-class ChatInputWidget(QFrame):
-    """Chat input text area."""
-    
-    def __init__(self):
-        super().__init__()
-        self.setObjectName("chatInputWidget")
-        self.init_ui()
-        
-    def init_ui(self):
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(8, 8, 8, 8)
-        layout.setSpacing(0)
-        
-        self.text_edit = QPlainTextEdit()
-        self.text_edit.setObjectName("chatInput")
-        self.text_edit.setPlaceholderText("Type your message here...")
-        self.text_edit.setMinimumHeight(60)
-        self.text_edit.setMaximumHeight(120)
-        layout.addWidget(self.text_edit)
-        
-    def get_text(self) -> str:
-        """Get the current input text."""
-        return self.text_edit.toPlainText()
-        
-    def clear(self):
-        """Clear the input."""
-        self.text_edit.clear()
-
-
-class ChatControlBar(QFrame):
-    """Control bar with model selector and send/stop button."""
-    
-    sendClicked = pyqtSignal()
-    stopClicked = pyqtSignal()
-    modelChanged = pyqtSignal(str, str)  # model, provider
-    
-    def __init__(self):
-        super().__init__()
-        self.setObjectName("chatControlBar")
-        self.is_generating = False
-        self.init_ui()
-        
-    def init_ui(self):
-        layout = QHBoxLayout(self)
-        layout.setContentsMargins(8, 8, 8, 8)
-        layout.setSpacing(8)
-        
-        # Text chat model selector
+        # Model selector
         self.model_selector = ModelSelectorWidget(
             applicable_task="text-chat",
             max_popup_height=400
         )
         self.model_selector.selection_confirmed.connect(self._on_model_selected)
-        layout.addWidget(self.model_selector)
+        control_layout.addWidget(self.model_selector)
         
-        layout.addStretch()
+        control_layout.addStretch()
         
-        # Send/Stop button
-        self.action_button = QPushButton("Send")
-        self.action_button.setObjectName("sendButton")
-        self.action_button.setMinimumWidth(80)
-        self.action_button.clicked.connect(self._on_action_click)
-        layout.addWidget(self.action_button)
+        # Settings button (placeholder)
+        self.settings_button = QPushButton("⚙")
+        self.settings_button.setObjectName("settingsButton")
+        self.settings_button.setFixedSize(32, 32)
+        self.settings_button.setToolTip("Settings (coming soon)")
+        self.settings_button.setStyleSheet("""
+            QPushButton#settingsButton {
+                background-color: #e8e8e8;
+                border: 1px solid #d0d0d0;
+                border-radius: 4px;
+                color: #333333;
+                font-size: 14px;
+            }
+            QPushButton#settingsButton:hover {
+                background-color: #d8d8d8;
+            }
+        """)
+        control_layout.addWidget(self.settings_button)
+        
+        layout.addWidget(control_bar)
+    
+    def _auto_detect_result(self):
+        """Auto-detect the latest transcription result directory."""
+        result_dir = find_latest_transcription_result()
+        if result_dir:
+            self._set_result_directory(result_dir)
+        else:
+            self.status_label.setText("No transcription results found")
+    
+    def _set_result_directory(self, result_dir: Path):
+        """Set the current result directory and update UI."""
+        self._current_result_dir = result_dir
+        self._word_timestamps_file = result_dir / 'merged_word_timestamps.csv'
+        
+        if self._word_timestamps_file.exists():
+            # Count lines
+            words = parse_word_timestamps(str(self._word_timestamps_file))
+            self._total_lines = len(words)
+            
+            # Update status (truncate long names)
+            name = result_dir.name
+            if len(name) > 30:
+                name = name[:27] + "..."
+            self.status_label.setText(f"Loaded: {name} ({self._total_lines:,} entries)")
+            
+            # Update cutpoint card max lines
+            self.cutpoint_card.set_max_lines(self._total_lines)
+            
+            # Update assemble card default ranges
+            if self._total_lines > 0:
+                ranges = []
+                chunk_size = 3000
+                for i in range(0, self._total_lines, chunk_size):
+                    end = min(i + chunk_size, self._total_lines)
+                    ranges.append((i + 1, end))
+                self.assemble_card.set_line_ranges(ranges)
+        else:
+            self.status_label.setText(f"Warning: merged_word_timestamps.csv not found")
+    
+    def _on_start_hover(self, is_hovering: bool):
+        """Handle Start button hover - highlight model selector."""
+        if is_hovering:
+            # Bold border with green color
+            self.model_selector.trigger_button.setStyleSheet("""
+                QPushButton#modelSelectorButton {
+                    background-color: #ffffff;
+                    color: #333333;
+                    border: 3px solid #4CAF50;
+                    border-radius: 6px;
+                    padding: 6px 14px;
+                    text-align: left;
+                    font-size: 12px;
+                    min-width: 180px;
+                }
+            """)
+        else:
+            # Normal border
+            self.model_selector.trigger_button.setStyleSheet("""
+                QPushButton#modelSelectorButton {
+                    background-color: #ffffff;
+                    color: #333333;
+                    border: 1px solid #d0d0d0;
+                    border-radius: 6px;
+                    padding: 8px 16px;
+                    text-align: left;
+                    font-size: 12px;
+                    min-width: 180px;
+                }
+                QPushButton#modelSelectorButton:hover {
+                    background-color: #f7f7f7;
+                    border-color: #b0b0b0;
+                }
+            """)
     
     def _on_model_selected(self, model: str, provider: str):
         """Handle model selection."""
-        print(f"[ChatControlBar] Text model selected: {model} @ {provider}")
-        self.modelChanged.emit(model, provider)
+        success = self.chat_core.set_model(model, provider)
+        if success:
+            show_flying_message(self, f"Model set: {model}")
+        else:
+            show_flying_message(self, f"Failed to set model: {model}")
     
-    def get_current_selection(self) -> tuple:
-        """Get current model selection."""
-        return self.model_selector.get_current_selection()
+    def _check_model_selected(self) -> bool:
+        """Check if a model is selected."""
+        model, provider = self.model_selector.get_current_selection()
+        if not model or not provider:
+            show_flying_message(self, "Please select a model first")
+            return False
         
-    def _on_action_click(self):
-        """Handle action button click."""
-        if self.is_generating:
-            self.stopClicked.emit()
-            self.set_generating(False)
-        else:
-            self.sendClicked.emit()
+        if self.chat_core.get_current_model() != model:
+            self.chat_core.set_model(model, provider)
+        
+        return True
+    
+    def _check_data_loaded(self) -> bool:
+        """Check if transcription data is loaded."""
+        if not self._word_timestamps_file or not self._word_timestamps_file.exists():
+            show_flying_message(self, "No word timestamps file loaded")
+            return False
+        return True
+    
+    def _create_popup(self, task_name: str, line_range: tuple = None) -> TaskPopupWindow:
+        """Create and configure a popup window."""
+        popup = TaskPopupWindow(task_name, line_range)
+        # Use an isolated ChatCore per popup to make concurrent tasks safe.
+        popup.set_chat_core(self._create_isolated_chat_core())
+        self._popup_windows.append(popup)
+        popup.destroyed.connect(lambda: self._popup_windows.remove(popup) if popup in self._popup_windows else None)
+        return popup
+    
+    # =========================================================================
+    # Task Handlers
+    # =========================================================================
+    
+    def _on_deduplicate_start(self):
+        """Handle Deduplicate task start."""
+        if not self._check_model_selected() or not self._check_data_loaded():
+            return
+        
+        popup = self._create_popup("Deduplicate")
+        popup.show()
+        
+        popup.log("Finding duplicate sequences...")
+        
+        duplicates = find_reverse_duplicates(str(self._word_timestamps_file))
+        popup.log(f"Found {len(duplicates)} duplicate sequences")
+        
+        if not duplicates:
+            popup.log("No duplicates found - nothing to process")
+            return
+        
+        contexts = get_duplicate_contexts(str(self._word_timestamps_file), duplicates)
+        
+        context_parts = []
+        for ctx in contexts[:10]:
+            context_parts.append(
+                f"=== Duplicate: '{ctx['word']}' (lines {ctx['first_line']}-{ctx['last_line']}) ===\n"
+                f"Time: {ctx['start_time']:.2f}s - {ctx['end_time']:.2f}s\n"
+                f"{ctx['context']}\n"
+            )
+        
+        context_text = "\n".join(context_parts)
+        popup.set_context(context_text)
+        
+        prompt_template = self.deduplicate_card.get_prompt()
+        user_input = self.deduplicate_card.get_user_input()
+        
+        prompt = prompt_template.replace("{user_input}", user_input or "None")
+        prompt = prompt.replace("{context}", context_text)
+        
+        popup.log(f"Sending prompt ({len(prompt)} chars) to LLM...")
+        popup.execute_prompt(prompt)
+    
+    def _on_cutpoint_start(self):
+        """Handle Cutpoint task start."""
+        if not self._check_model_selected() or not self._check_data_loaded():
+            return
+        
+        popup = self._create_popup("Cutpoint")
+        popup.show()
+        
+        lines_per_segment = self.cutpoint_card.get_lines_per_segment()
+        popup.log(f"Lines per segment: {lines_per_segment}")
+        popup.log(f"Total lines: {self._total_lines}")
+        
+        cutpoints = []
+        for i in range(lines_per_segment, self._total_lines, lines_per_segment):
+            cutpoints.append(i)
+        
+        popup.log(f"Planned cutpoints: {cutpoints}")
+        
+        if not cutpoints:
+            popup.log("File too short for cutpoints")
+            return
+        
+        cutpoint = cutpoints[0]
+        
+        words = parse_word_timestamps(str(self._word_timestamps_file))
+        start_idx = max(0, cutpoint - 50)
+        end_idx = min(len(words), cutpoint + 50)
+        
+        context_lines = []
+        for i in range(start_idx, end_idx):
+            start, end, word, line_num = words[i]
+            marker = " <-- PROPOSED CUTPOINT" if line_num == cutpoint else ""
+            context_lines.append(f"{line_num}: {start:.2f} {end:.2f} \"{word}\"{marker}")
+        
+        context_text = "\n".join(context_lines)
+        popup.set_context(context_text)
+        
+        prompt_template = self.cutpoint_card.get_prompt()
+        user_input = self.cutpoint_card.get_user_input()
+        
+        prompt = prompt_template.replace("{user_input}", user_input or "None")
+        prompt = prompt.replace("{lines_per_segment}", str(lines_per_segment))
+        prompt = prompt.replace("{context}", context_text)
+        
+        popup.log(f"Sending prompt ({len(prompt)} chars) to LLM...")
+        popup.execute_prompt(prompt)
+    
+    def _on_assemble_start(self):
+        """Handle Assemble Sentence task start."""
+        if not self._check_model_selected() or not self._check_data_loaded():
+            return
+        
+        line_ranges = self.assemble_card.get_line_ranges()
+        
+        if not line_ranges:
+            show_flying_message(self, "No line ranges defined")
+            return
+        
+        words = parse_word_timestamps(str(self._word_timestamps_file))
+        
+        for start_line, end_line in line_ranges:
+            popup = self._create_popup("Assemble Sentence", (start_line, end_line))
+            popup.show()
             
-    def set_generating(self, generating: bool):
-        """Update button state based on generation status."""
-        self.is_generating = generating
-        if generating:
-            self.action_button.setText("Stop")
-            self.action_button.setObjectName("stopButton")
-        else:
-            self.action_button.setText("Send")
-            self.action_button.setObjectName("sendButton")
-        # Force style refresh
-        self.action_button.style().unpolish(self.action_button)
-        self.action_button.style().polish(self.action_button)
+            popup.log(f"Processing lines {start_line} to {end_line}")
+            
+            context_lines = []
+            for start, end, word, line_num in words:
+                if start_line <= line_num <= end_line:
+                    context_lines.append(f"{start:.2f} {end:.2f} \"{word}\"")
+            
+            if not context_lines:
+                popup.log("No data in specified range")
+                continue
+            
+            context_text = "\n".join(context_lines)
+            popup.set_context(context_text)
+            
+            prompt_template = self.assemble_card.get_prompt()
+            user_input = self.assemble_card.get_user_input()
+            
+            prompt = prompt_template.replace("{user_input}", user_input or "None")
+            prompt = prompt.replace("{start_line}", str(start_line))
+            prompt = prompt.replace("{end_line}", str(end_line))
+            prompt = prompt.replace("{context}", context_text)
+            
+            popup.log(f"Sending prompt ({len(prompt)} chars) to LLM...")
+            popup.execute_prompt(prompt)
+            
+            QApplication.processEvents()
