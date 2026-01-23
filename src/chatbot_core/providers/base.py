@@ -54,7 +54,8 @@ class ChatProvider(ABC):
     @abstractmethod
     def chat(self, thread: ChatThread, 
              temperature: Optional[float] = None,
-             max_tokens: Optional[int] = None) -> ChatResponse:
+             max_tokens: Optional[int] = None,
+             request_options: Optional[Dict[str, Any]] = None) -> ChatResponse:
         """
         Send a chat request and return the complete response.
         
@@ -72,6 +73,7 @@ class ChatProvider(ABC):
     def chat_stream(self, thread: ChatThread,
                     temperature: Optional[float] = None,
                     max_tokens: Optional[int] = None,
+                    request_options: Optional[Dict[str, Any]] = None,
                     on_token: Optional[Callable[[str], None]] = None) -> Generator[str, None, ChatResponse]:
         """
         Send a chat request and stream the response.

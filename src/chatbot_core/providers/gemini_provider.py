@@ -5,11 +5,12 @@ Uses the google-genai SDK as demonstrated in the reference project (anime-pv-ocr
 Supports streaming responses and custom base URLs for proxy endpoints.
 """
 
-from typing import Optional, Generator, Callable
+from typing import Optional, Generator, Callable, Dict, Any
 
 from .base import ChatProvider, ChatResponse
 from ..data_types import ChatThread
 from ..model_resolver import ResolvedModelConfig
+from ..thinking_resolver import resolve_thinking
 
 
 class GeminiProvider(ChatProvider):
@@ -53,7 +54,8 @@ class GeminiProvider(ChatProvider):
     
     def chat(self, thread: ChatThread,
              temperature: Optional[float] = None,
-             max_tokens: Optional[int] = None) -> ChatResponse:
+             max_tokens: Optional[int] = None,
+             request_options: Optional[Dict[str, Any]] = None) -> ChatResponse:
         """
         Send a chat request and return the complete response.
         """
@@ -63,7 +65,7 @@ class GeminiProvider(ChatProvider):
         system_instruction, contents = thread.to_gemini_contents()
         
         # Build config
-        config = self._build_config(temperature, max_tokens, system_instruction)
+        config = self._build_config(temperature, max_tokens, system_instruction, request_options=request_options)
         
         try:
             response = client.models.generate_content(
@@ -111,6 +113,7 @@ class GeminiProvider(ChatProvider):
     def chat_stream(self, thread: ChatThread,
                     temperature: Optional[float] = None,
                     max_tokens: Optional[int] = None,
+                    request_options: Optional[Dict[str, Any]] = None,
                     on_token: Optional[Callable[[str], None]] = None) -> Generator[str, None, ChatResponse]:
         """
         Send a chat request and stream the response.
@@ -121,7 +124,7 @@ class GeminiProvider(ChatProvider):
         system_instruction, contents = thread.to_gemini_contents()
         
         # Build config
-        config = self._build_config(temperature, max_tokens, system_instruction)
+        config = self._build_config(temperature, max_tokens, system_instruction, request_options=request_options)
         
         full_content = ""
         usage = {}
@@ -169,9 +172,14 @@ class GeminiProvider(ChatProvider):
             print(f"[GeminiProvider] Stream error: {e}")
             raise
     
-    def _build_config(self, temperature: Optional[float], 
-                      max_tokens: Optional[int],
-                      system_instruction: Optional[str]) -> dict:
+    def _build_config(
+        self,
+        temperature: Optional[float],
+        max_tokens: Optional[int],
+        system_instruction: Optional[str],
+        *,
+        request_options: Optional[Dict[str, Any]] = None,
+    ) -> dict:
         """Build generation config for Gemini API."""
         try:
             import google.genai.types as types
@@ -197,6 +205,23 @@ class GeminiProvider(ChatProvider):
         # System instruction
         if system_instruction:
             config["system_instruction"] = system_instruction
+
+        # Thinking config (Gemini 2.5 budget / Gemini 3 level)
+        try:
+            thinking_level = (request_options or {}).get("thinking_level")
+            task_key = (request_options or {}).get("task_key")
+            resolved = resolve_thinking(self.config, thinking_level, task_key=task_key)
+            if resolved.gemini_thinking_config:
+                if types is not None:
+                    try:
+                        # google.genai.types.ThinkingConfig uses snake_case fields
+                        config["thinking_config"] = types.ThinkingConfig(**resolved.gemini_thinking_config)
+                    except Exception:
+                        config["thinking_config"] = resolved.gemini_thinking_config
+                else:
+                    config["thinking_config"] = resolved.gemini_thinking_config
+        except Exception as e:
+            print(f"[GeminiProvider] Warning: thinking resolver failed: {e}")
         
         return config if config else None
     

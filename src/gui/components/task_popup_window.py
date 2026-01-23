@@ -18,6 +18,7 @@ from PyQt5.QtGui import QFont, QTextCursor
 from typing import Optional, Callable
 import sys
 from pathlib import Path
+from contextlib import contextmanager
 
 # Add src to path for imports
 src_path = Path(__file__).parent.parent.parent
@@ -92,34 +93,87 @@ class LLMWorker(QThread):
     error_occurred = pyqtSignal(str)
     log_message = pyqtSignal(str)
     
-    def __init__(self, chat_core: ChatCore, prompt: str):
+    def __init__(self, chat_core: ChatCore, prompt: str, thinking_level: Optional[str] = None, task_key: Optional[str] = None):
         super().__init__()
         self.chat_core = chat_core
         self.prompt = prompt
+        self.thinking_level = thinking_level
+        self.task_key = task_key
         self._stop_requested = False
+
+    class _SignalWriter:
+        """
+        File-like object to capture prints from providers and forward them
+        into the popup's console log via a Qt signal.
+        """
+
+        def __init__(self, emit_line):
+            self._emit_line = emit_line
+            self._buf = ""
+
+        def write(self, s):
+            if not s:
+                return 0
+            self._buf += str(s)
+            while "\n" in self._buf:
+                line, self._buf = self._buf.split("\n", 1)
+                line = line.rstrip("\r")
+                if line.strip():
+                    self._emit_line(line)
+            return len(s)
+
+        def flush(self):
+            if self._buf.strip():
+                self._emit_line(self._buf.rstrip("\r\n"))
+            self._buf = ""
+
+    @contextmanager
+    def _capture_console(self):
+        """
+        Capture stdout/stderr during the request so provider-side print logs
+        (e.g. OpenAIProvider Stream error) appear in the GUI popup log.
+        """
+        old_out, old_err = sys.stdout, sys.stderr
+        writer = self._SignalWriter(lambda line: self.log_message.emit(line))
+        try:
+            sys.stdout = writer
+            sys.stderr = writer
+            yield
+        finally:
+            try:
+                writer.flush()
+            except Exception:
+                pass
+            sys.stdout, sys.stderr = old_out, old_err
     
     def run(self):
         """Execute LLM request."""
         try:
-            self.log_message.emit("Starting LLM request...")
-            full_response = ""
-            
-            gen = self.chat_core.send_stream(self.prompt)
-            
-            try:
-                while not self._stop_requested:
-                    chunk = next(gen)
-                    full_response += chunk
-                    self.chunk_received.emit(chunk)
-            except StopIteration as e:
-                if e.value:
-                    full_response = e.value
-            
-            if not self._stop_requested:
-                self.log_message.emit("Response complete.")
-                self.response_complete.emit(full_response)
-                
+            with self._capture_console():
+                self.log_message.emit("Starting LLM request...")
+                full_response = ""
+
+                gen = self.chat_core.send_stream(
+                    self.prompt,
+                    thinking_level=self.thinking_level,
+                    task_key=self.task_key,
+                )
+
+                try:
+                    while not self._stop_requested:
+                        chunk = next(gen)
+                        full_response += chunk
+                        self.chunk_received.emit(chunk)
+                except StopIteration as e:
+                    if e.value:
+                        full_response = e.value
+
+                if not self._stop_requested:
+                    self.log_message.emit("Response complete.")
+                    self.response_complete.emit(full_response)
+
         except Exception as e:
+            # Keep both provider print logs (captured) + the exception itself.
             self.error_occurred.emit(str(e))
     
     def request_stop(self):
@@ -152,6 +206,8 @@ class TaskPopupWindow(QDialog):
         self.chat_core: Optional[ChatCore] = None
         self._worker: Optional[LLMWorker] = None
         self._response_text = ""
+        self._thinking_level: Optional[str] = None
+        self._task_key: Optional[str] = None
         
         self.setWindowTitle(f"Task: {task_name}")
         self.setMinimumSize(600, 500)
@@ -321,7 +377,7 @@ class TaskPopupWindow(QDialog):
         """Set the ChatCore instance to use."""
         self.chat_core = chat_core
     
-    def execute_prompt(self, prompt: str):
+    def execute_prompt(self, prompt: str, *, thinking_level: Optional[str] = None, task_key: Optional[str] = None):
         """Execute the prompt using ChatCore."""
         if not self.chat_core:
             self.log("Error: No ChatCore instance set")
@@ -334,7 +390,12 @@ class TaskPopupWindow(QDialog):
             self.log("Error: No model selected")
             return
         
+        self._thinking_level = thinking_level
+        self._task_key = task_key
+
         self.log(f"Model: {model} @ {provider}")
+        if thinking_level:
+            self.log(f"Thinking: {thinking_level}")
         self.log(f"Prompt length: {len(prompt)} characters")
         self.log("-" * 40)
         
@@ -342,7 +403,7 @@ class TaskPopupWindow(QDialog):
         self._response_text = ""
         
         # Start worker
-        self._worker = LLMWorker(self.chat_core, prompt)
+        self._worker = LLMWorker(self.chat_core, prompt, thinking_level=thinking_level, task_key=task_key)
         self._worker.chunk_received.connect(self._on_chunk)
         self._worker.response_complete.connect(self._on_complete)
         self._worker.error_occurred.connect(self._on_error)

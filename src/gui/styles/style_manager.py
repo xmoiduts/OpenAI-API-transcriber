@@ -3,7 +3,9 @@ def get_base_stylesheet():
     return """
         QMainWindow, QWidget {
             background-color: #f0f0f0;
-            font-family: Arial, sans-serif;
+            font-family: "Microsoft YaHei", "Segoe UI", Arial, sans-serif;
+            font-size: 14px;
+            color: #333333;
         }
         QLabel, QPushButton, QTabBar::tab {
             color: #333333;
@@ -387,7 +389,7 @@ def get_chat_sidebar_stylesheet():
         QLabel#panelHeader {
             background-color: #f3f3f3;
             color: #333333;
-            font-size: 12px;
+            font-size: 14px;
             font-weight: bold;
             padding-left: 12px;
             border-bottom: 1px solid #e0e0e0;
@@ -403,7 +405,7 @@ def get_chat_sidebar_stylesheet():
             background-color: #f7f7f7;
             color: #333333;
             border: none;
-            font-size: 13px;
+            font-size: 14px;
             outline: none;
         }
         
@@ -473,7 +475,7 @@ def get_chat_sidebar_stylesheet():
         
         QLabel#messageRole {
             color: #666666;
-            font-size: 11px;
+            font-size: 13px;
         }
         
         QFrame#chatMessage_user QLabel#messageRole {
@@ -486,7 +488,7 @@ def get_chat_sidebar_stylesheet():
         
         QLabel#messageContent {
             color: #333333;
-            font-size: 13px;
+            font-size: 14px;
             line-height: 1.4;
         }
         
@@ -502,7 +504,7 @@ def get_chat_sidebar_stylesheet():
             border: 1px solid #d0d0d0;
             border-radius: 6px;
             padding: 8px;
-            font-size: 13px;
+            font-size: 14px;
             selection-background-color: #b3d9ff;
         }
         
@@ -522,7 +524,7 @@ def get_chat_sidebar_stylesheet():
             border: 1px solid #d0d0d0;
             border-radius: 4px;
             padding: 6px 10px;
-            font-size: 12px;
+            font-size: 14px;
         }
         
         QComboBox#modelSelector:disabled {
@@ -536,7 +538,7 @@ def get_chat_sidebar_stylesheet():
             border: none;
             border-radius: 4px;
             padding: 8px 16px;
-            font-size: 13px;
+            font-size: 14px;
             font-weight: bold;
         }
         
@@ -554,7 +556,7 @@ def get_chat_sidebar_stylesheet():
             border: none;
             border-radius: 4px;
             padding: 8px 16px;
-            font-size: 13px;
+            font-size: 14px;
             font-weight: bold;
         }
         

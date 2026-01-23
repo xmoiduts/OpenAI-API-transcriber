@@ -11,12 +11,20 @@ Each card contains:
 
 from PyQt5.QtWidgets import (
     QFrame, QVBoxLayout, QHBoxLayout, QLabel, 
-    QPushButton, QPlainTextEdit, QSizePolicy, QWidget
+    QPushButton, QPlainTextEdit, QSizePolicy, QWidget, QComboBox
 )
 from PyQt5.QtCore import Qt, pyqtSignal, QEvent
 from PyQt5.QtGui import QFont
 from pathlib import Path
 from typing import Optional, Callable
+
+try:
+    # Optional (used for reading task defaults from config.yaml)
+    from chatbot_core.thinking_resolver import load_root_config, get_task_default_thinking_level, SUPPORTED_NORMALIZED_LEVELS
+except Exception:
+    load_root_config = None
+    get_task_default_thinking_level = None
+    SUPPORTED_NORMALIZED_LEVELS = ("auto", "no", "low", "mid", "high")
 
 
 class TaskCard(QFrame):
@@ -33,11 +41,13 @@ class TaskCard(QFrame):
     def __init__(
         self,
         task_name: str,
+        task_key: str,
         prompt_file: Optional[str] = None,
         parent: Optional[QWidget] = None
     ):
         super().__init__(parent)
         self.task_name = task_name
+        self.task_key = task_key
         self.prompt_file = prompt_file
         
         self.setObjectName("taskCard")
@@ -61,7 +71,7 @@ class TaskCard(QFrame):
         self.header = QLabel(self.task_name)
         self.header.setObjectName("taskCardHeader")
         header_font = QFont()
-        header_font.setPointSize(12)
+        header_font.setPointSize(14)
         header_font.setBold(True)
         self.header.setFont(header_font)
         layout.addWidget(self.header)
@@ -89,6 +99,40 @@ class TaskCard(QFrame):
         self.user_input.setMinimumHeight(40)
         self.user_input.setMaximumHeight(80)
         layout.addWidget(self.user_input)
+
+        # Thinking level selector (per-task)
+        thinking_container = QWidget()
+        thinking_layout = QHBoxLayout(thinking_container)
+        thinking_layout.setContentsMargins(0, 0, 0, 0)
+        thinking_layout.setSpacing(6)
+
+        thinking_label = QLabel("Thinking:")
+        thinking_label.setStyleSheet("color: #666666; font-size: 13px;")
+        thinking_layout.addWidget(thinking_label)
+
+        self.thinking_combo = QComboBox()
+        self.thinking_combo.setObjectName("thinkingLevelCombo")
+        self.thinking_combo.setStyleSheet("""
+            QComboBox#thinkingLevelCombo {
+                background-color: #ffffff;
+                border: 1px solid #d0d0d0;
+                border-radius: 4px;
+                padding: 2px 8px;
+                min-width: 90px;
+                font-size: 13px;
+            }
+            QComboBox#thinkingLevelCombo:hover {
+                border-color: #b0b0b0;
+            }
+        """)
+
+        # Populate defaults
+        self.set_supported_thinking_levels(list(SUPPORTED_NORMALIZED_LEVELS))
+        self._apply_default_thinking_level()
+
+        thinking_layout.addWidget(self.thinking_combo)
+        thinking_layout.addStretch()
+        layout.addWidget(thinking_container)
         
         # Task-specific controls container (for subclasses)
         self.controls_container = QWidget()
@@ -129,7 +173,7 @@ class TaskCard(QFrame):
             }
             QLabel#taskCardLabel {
                 color: #666666;
-                font-size: 11px;
+                font-size: 13px;
             }
             QPlainTextEdit#taskCardPrompt, QPlainTextEdit#taskCardUserInput {
                 background-color: #fafafa;
@@ -137,7 +181,7 @@ class TaskCard(QFrame):
                 border-radius: 4px;
                 padding: 8px;
                 font-family: Consolas, Monaco, monospace;
-                font-size: 11px;
+                font-size: 13px;
             }
             QPlainTextEdit#taskCardPrompt:focus, QPlainTextEdit#taskCardUserInput:focus {
                 border-color: #4a9eff;
@@ -200,6 +244,65 @@ class TaskCard(QFrame):
         self.start_button.setEnabled(enabled)
         self.prompt_edit.setEnabled(enabled)
         self.user_input.setEnabled(enabled)
+        if hasattr(self, "thinking_combo"):
+            self.thinking_combo.setEnabled(enabled)
+
+    def _apply_default_thinking_level(self):
+        """
+        Initialize thinking selector from config.yaml task default when available.
+        """
+        if load_root_config and get_task_default_thinking_level:
+            try:
+                root = load_root_config()
+                default_level = get_task_default_thinking_level(root, self.task_key)
+                if default_level and self._combo_has_value(default_level):
+                    self.thinking_combo.setCurrentText(default_level)
+                    return
+            except Exception:
+                pass
+
+        # Fallback: assemble-sentence defaults to low, others to auto
+        fallback = "low" if self.task_key == "assemble-sentence" else "auto"
+        if self._combo_has_value(fallback):
+            self.thinking_combo.setCurrentText(fallback)
+
+    def _combo_has_value(self, value: str) -> bool:
+        for i in range(self.thinking_combo.count()):
+            if self.thinking_combo.itemText(i) == value:
+                return True
+        return False
+
+    def get_thinking_level(self) -> str:
+        """Get currently selected thinking level (normalized)."""
+        if hasattr(self, "thinking_combo"):
+            return self.thinking_combo.currentText().strip() or "auto"
+        return "auto"
+
+    def set_supported_thinking_levels(self, levels: list):
+        """
+        Update the thinking selector options.
+
+        Policy:
+        - If a level (e.g. 'no') is not supported, we hide it (remove from list).
+        - Try to keep the current selection when possible.
+        """
+        if not hasattr(self, "thinking_combo"):
+            return
+
+        current = self.get_thinking_level()
+
+        self.thinking_combo.blockSignals(True)
+        try:
+            self.thinking_combo.clear()
+            for level in levels:
+                self.thinking_combo.addItem(level)
+            # preserve selection
+            if current and self._combo_has_value(current):
+                self.thinking_combo.setCurrentText(current)
+            else:
+                self._apply_default_thinking_level()
+        finally:
+            self.thinking_combo.blockSignals(False)
 
 
 class DeduplicateCard(TaskCard):
@@ -208,6 +311,7 @@ class DeduplicateCard(TaskCard):
     def __init__(self, parent: Optional[QWidget] = None):
         super().__init__(
             task_name="Deduplicate",
+            task_key="deduplicate",
             prompt_file="prompts/sentence-rebuild/deduplicate.txt",
             parent=parent
         )
@@ -228,6 +332,7 @@ class CutpointCard(TaskCard):
         
         super().__init__(
             task_name="Cutpoint",
+            task_key="cutpoint",
             prompt_file="prompts/sentence-rebuild/cutpoint.txt",
             parent=parent
         )
@@ -241,7 +346,7 @@ class CutpointCard(TaskCard):
         slider_layout.setContentsMargins(0, 4, 0, 4)
         
         label = QLabel("Lines per segment:")
-        label.setStyleSheet("color: #666666; font-size: 11px;")
+        label.setStyleSheet("color: #666666; font-size: 13px;")
         slider_layout.addWidget(label)
         
         self.slider_label = QLabel(str(self._lines_per_segment))
@@ -321,6 +426,7 @@ class AssembleCard(TaskCard):
         
         super().__init__(
             task_name="Assemble Sentence",
+            task_key="assemble-sentence",
             prompt_file="prompts/sentence-rebuild/assemble.txt",
             parent=parent
         )
@@ -391,7 +497,7 @@ class AssembleCard(TaskCard):
         
         # "line" label
         line_label = QLabel("line")
-        line_label.setStyleSheet("color: #666666; font-size: 11px;")
+        line_label.setStyleSheet("color: #666666; font-size: 13px;")
         row_layout.addWidget(line_label)
         
         # Start input

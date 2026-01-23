@@ -173,7 +173,9 @@ class ChatCore:
     
     def send(self, message: str, 
              temperature: Optional[float] = None,
-             max_tokens: Optional[int] = None) -> Optional[str]:
+             max_tokens: Optional[int] = None,
+             thinking_level: Optional[str] = None,
+             task_key: Optional[str] = None) -> Optional[str]:
         """
         Send a message and get the complete response.
         
@@ -200,6 +202,10 @@ class ChatCore:
                 self._thread,
                 temperature=temperature,
                 max_tokens=max_tokens,
+                request_options={
+                    "thinking_level": thinking_level,
+                    "task_key": task_key,
+                },
             )
             
             # Add assistant response to thread
@@ -223,7 +229,9 @@ class ChatCore:
     
     def send_stream(self, message: str,
                     temperature: Optional[float] = None,
-                    max_tokens: Optional[int] = None) -> Generator[str, None, Optional[str]]:
+                    max_tokens: Optional[int] = None,
+                    thinking_level: Optional[str] = None,
+                    task_key: Optional[str] = None) -> Generator[str, None, Optional[str]]:
         """
         Send a message and stream the response.
         
@@ -255,6 +263,10 @@ class ChatCore:
                 self._thread,
                 temperature=temperature,
                 max_tokens=max_tokens,
+                request_options={
+                    "thinking_level": thinking_level,
+                    "task_key": task_key,
+                },
                 on_token=self._on_response_chunk,
             )
             

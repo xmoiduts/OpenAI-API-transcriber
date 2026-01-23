@@ -34,6 +34,7 @@ if str(src_path) not in sys.path:
     sys.path.insert(0, str(src_path))
 
 from chatbot_core import ChatCore
+from chatbot_core.thinking_resolver import resolve_thinking
 from sentence_builder.reverse_dedup import (
     find_reverse_duplicates, 
     get_duplicate_contexts,
@@ -443,8 +444,31 @@ class TaskCardsSidebarPanel(QFrame):
         success = self.chat_core.set_model(model, provider)
         if success:
             show_flying_message(self, f"Model set: {model}")
+            self._refresh_thinking_controls()
         else:
             show_flying_message(self, f"Failed to set model: {model}")
+
+    def _refresh_thinking_controls(self):
+        """
+        Refresh per-task thinking selector options based on the selected model/provider.
+        Hides/omits 'no' when scheme does not support truly disabling thinking.
+        """
+        cfg = self.chat_core.get_current_config()
+        if not cfg:
+            return
+
+        try:
+            # Each task card reads its own default, but we also constrain the options by scheme.
+            tasks = [
+                (self.deduplicate_card, "deduplicate"),
+                (self.cutpoint_card, "cutpoint"),
+                (self.assemble_card, "assemble-sentence"),
+            ]
+            for card, task_key in tasks:
+                res = resolve_thinking(cfg, None, task_key=task_key)
+                card.set_supported_thinking_levels(res.ui_supported_levels)
+        except Exception as e:
+            print(f"[SentenceBuilder] Warning: failed to refresh thinking controls: {e}")
     
     def _check_model_selected(self) -> bool:
         """Check if a model is selected."""
@@ -515,7 +539,11 @@ class TaskCardsSidebarPanel(QFrame):
         prompt = prompt.replace("{context}", context_text)
         
         popup.log(f"Sending prompt ({len(prompt)} chars) to LLM...")
-        popup.execute_prompt(prompt)
+        popup.execute_prompt(
+            prompt,
+            thinking_level=self.deduplicate_card.get_thinking_level(),
+            task_key="deduplicate",
+        )
     
     def _on_cutpoint_start(self):
         """Handle Cutpoint task start."""
@@ -562,7 +590,11 @@ class TaskCardsSidebarPanel(QFrame):
         prompt = prompt.replace("{context}", context_text)
         
         popup.log(f"Sending prompt ({len(prompt)} chars) to LLM...")
-        popup.execute_prompt(prompt)
+        popup.execute_prompt(
+            prompt,
+            thinking_level=self.cutpoint_card.get_thinking_level(),
+            task_key="cutpoint",
+        )
     
     def _on_assemble_start(self):
         """Handle Assemble Sentence task start."""
@@ -604,6 +636,10 @@ class TaskCardsSidebarPanel(QFrame):
             prompt = prompt.replace("{context}", context_text)
             
             popup.log(f"Sending prompt ({len(prompt)} chars) to LLM...")
-            popup.execute_prompt(prompt)
+            popup.execute_prompt(
+                prompt,
+                thinking_level=self.assemble_card.get_thinking_level(),
+                task_key="assemble-sentence",
+            )
             
             QApplication.processEvents()

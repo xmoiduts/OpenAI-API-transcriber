@@ -5,11 +5,12 @@ Uses the anthropic Python package for direct Anthropic API access.
 Also supports OpenAI-compatible endpoints for Claude via proxy services.
 """
 
-from typing import Optional, Generator, Callable
+from typing import Optional, Generator, Callable, Dict, Any
 
 from .base import ChatProvider, ChatResponse
 from ..data_types import ChatThread
 from ..model_resolver import ResolvedModelConfig
+from ..thinking_resolver import resolve_thinking
 
 
 class ClaudeProvider(ChatProvider):
@@ -55,7 +56,8 @@ class ClaudeProvider(ChatProvider):
     
     def chat(self, thread: ChatThread,
              temperature: Optional[float] = None,
-             max_tokens: Optional[int] = None) -> ChatResponse:
+             max_tokens: Optional[int] = None,
+             request_options: Optional[Dict[str, Any]] = None) -> ChatResponse:
         """
         Send a chat request and return the complete response.
         """
@@ -69,6 +71,16 @@ class ClaudeProvider(ChatProvider):
             "model": self.config.api_name,
             "messages": messages,
         }
+
+        # Thinking / extended thinking (best-effort; ignored if unsupported)
+        try:
+            thinking_level = (request_options or {}).get("thinking_level")
+            task_key = (request_options or {}).get("task_key")
+            resolved = resolve_thinking(self.config, thinking_level, task_key=task_key)
+            if resolved.anthropic_params:
+                params.update(resolved.anthropic_params)
+        except Exception as e:
+            print(f"[ClaudeProvider] Warning: thinking resolver failed: {e}")
         
         # System prompt
         if system_prompt:
@@ -124,6 +136,7 @@ class ClaudeProvider(ChatProvider):
     def chat_stream(self, thread: ChatThread,
                     temperature: Optional[float] = None,
                     max_tokens: Optional[int] = None,
+                    request_options: Optional[Dict[str, Any]] = None,
                     on_token: Optional[Callable[[str], None]] = None) -> Generator[str, None, ChatResponse]:
         """
         Send a chat request and stream the response.
@@ -138,6 +151,16 @@ class ClaudeProvider(ChatProvider):
             "model": self.config.api_name,
             "messages": messages,
         }
+
+        # Thinking / extended thinking (best-effort; ignored if unsupported)
+        try:
+            thinking_level = (request_options or {}).get("thinking_level")
+            task_key = (request_options or {}).get("task_key")
+            resolved = resolve_thinking(self.config, thinking_level, task_key=task_key)
+            if resolved.anthropic_params:
+                params.update(resolved.anthropic_params)
+        except Exception as e:
+            print(f"[ClaudeProvider] Warning: thinking resolver failed: {e}")
         
         # System prompt
         if system_prompt:

@@ -5,11 +5,12 @@ Handles both official OpenAI API and OpenAI-compatible endpoints (aihubmix, etc.
 Uses the openai Python package.
 """
 
-from typing import Optional, Generator, Callable
+from typing import Optional, Generator, Callable, Dict, Any
 
 from .base import ChatProvider, ChatResponse
 from ..data_types import ChatThread
 from ..model_resolver import ResolvedModelConfig
+from ..thinking_resolver import resolve_thinking
 
 
 class OpenAIProvider(ChatProvider):
@@ -47,7 +48,8 @@ class OpenAIProvider(ChatProvider):
     
     def chat(self, thread: ChatThread,
              temperature: Optional[float] = None,
-             max_tokens: Optional[int] = None) -> ChatResponse:
+             max_tokens: Optional[int] = None,
+             request_options: Optional[Dict[str, Any]] = None) -> ChatResponse:
         """
         Send a chat request and return the complete response.
         """
@@ -61,6 +63,16 @@ class OpenAIProvider(ChatProvider):
             "model": self.config.api_name,
             "messages": messages,
         }
+
+        # Thinking / reasoning (best-effort; may be ignored by endpoint)
+        try:
+            thinking_level = (request_options or {}).get("thinking_level")
+            task_key = (request_options or {}).get("task_key")
+            resolved = resolve_thinking(self.config, thinking_level, task_key=task_key)
+            if resolved.openai_params:
+                params.update(resolved.openai_params)
+        except Exception as e:
+            print(f"[OpenAIProvider] Warning: thinking resolver failed: {e}")
         
         # Temperature
         temp = self._resolve_temperature(temperature)
@@ -106,6 +118,7 @@ class OpenAIProvider(ChatProvider):
     def chat_stream(self, thread: ChatThread,
                     temperature: Optional[float] = None,
                     max_tokens: Optional[int] = None,
+                    request_options: Optional[Dict[str, Any]] = None,
                     on_token: Optional[Callable[[str], None]] = None) -> Generator[str, None, ChatResponse]:
         """
         Send a chat request and stream the response.
@@ -121,6 +134,16 @@ class OpenAIProvider(ChatProvider):
             "messages": messages,
             "stream": True,
         }
+
+        # Thinking / reasoning (best-effort; may be ignored by endpoint)
+        try:
+            thinking_level = (request_options or {}).get("thinking_level")
+            task_key = (request_options or {}).get("task_key")
+            resolved = resolve_thinking(self.config, thinking_level, task_key=task_key)
+            if resolved.openai_params:
+                params.update(resolved.openai_params)
+        except Exception as e:
+            print(f"[OpenAIProvider] Warning: thinking resolver failed: {e}")
         
         # Temperature
         temp = self._resolve_temperature(temperature)
