@@ -305,16 +305,101 @@ class TaskCard(QFrame):
             self.thinking_combo.blockSignals(False)
 
 
-class DeduplicateCard(TaskCard):
-    """Card for the deduplicate task - no extra controls."""
+class MergeOverlapsCard(TaskCard):
+    """Card for the merge overlaps task - merges overlapping timestamp regions from segmented transcription."""
+    
+    chars_changed = pyqtSignal(int)  # Emitted when chars per slice changes
     
     def __init__(self, parent: Optional[QWidget] = None):
+        self._chars_per_slice = 10000
+        self._min_chars = 1000
+        self._max_chars = 100000
+        self._drag_start_x = 0
+        self._drag_start_value = 0
+        self._is_dragging = False
+        
         super().__init__(
-            task_name="Deduplicate",
-            task_key="deduplicate",
-            prompt_file="prompts/sentence-rebuild/deduplicate.txt",
+            task_name="Merge Overlaps",
+            task_key="merge_overlaps",
+            prompt_file="prompts/sentence-rebuild/merge_overlaps.txt",
             parent=parent
         )
+        
+        self._init_slider_control()
+    
+    def _init_slider_control(self):
+        """Initialize the drag slider control."""
+        slider_container = QWidget()
+        slider_layout = QHBoxLayout(slider_container)
+        slider_layout.setContentsMargins(0, 4, 0, 4)
+        
+        label = QLabel("Chars per slice:")
+        label.setStyleSheet("color: #666666; font-size: 13px;")
+        slider_layout.addWidget(label)
+        
+        self.slider_label = QLabel(str(self._chars_per_slice))
+        self.slider_label.setObjectName("mergeOverlapsSlider")
+        self.slider_label.setStyleSheet("""
+            QLabel#mergeOverlapsSlider {
+                background-color: #f0f0f0;
+                border: 1px solid #d0d0d0;
+                border-radius: 4px;
+                padding: 4px 12px;
+                font-family: Consolas, Monaco, monospace;
+                font-weight: bold;
+                min-width: 60px;
+            }
+            QLabel#mergeOverlapsSlider:hover {
+                background-color: #e8e8e8;
+                border-color: #b0b0b0;
+            }
+        """)
+        self.slider_label.setCursor(Qt.SizeHorCursor)  # <-> cursor
+        self.slider_label.setMouseTracking(True)
+        self.slider_label.installEventFilter(self)
+        slider_layout.addWidget(self.slider_label)
+        
+        slider_layout.addStretch()
+        self.add_control(slider_container)
+    
+    def eventFilter(self, obj, event):
+        """Handle drag events for slider."""
+        if hasattr(self, 'slider_label') and obj == self.slider_label:
+            if event.type() == QEvent.MouseButtonPress:
+                if event.button() == Qt.LeftButton:
+                    self._is_dragging = True
+                    self._drag_start_x = event.globalX()
+                    self._drag_start_value = self._chars_per_slice
+                    return True
+            elif event.type() == QEvent.MouseMove:
+                if self._is_dragging:
+                    delta_x = event.globalX() - self._drag_start_x
+                    # 10 pixels = 1000 chars
+                    delta_chars = (delta_x // 10) * 1000
+                    new_value = self._drag_start_value + delta_chars
+                    new_value = max(self._min_chars, min(self._max_chars, new_value))
+                    if new_value != self._chars_per_slice:
+                        self._chars_per_slice = new_value
+                        self.slider_label.setText(str(new_value))
+                        self.chars_changed.emit(new_value)
+                    return True
+            elif event.type() == QEvent.MouseButtonRelease:
+                if event.button() == Qt.LeftButton and self._is_dragging:
+                    self._is_dragging = False
+                    return True
+        
+        return super().eventFilter(obj, event)
+    
+    def get_chars_per_slice(self) -> int:
+        """Get the current chars per slice value."""
+        return self._chars_per_slice
+    
+    def set_chars_per_slice(self, value: int):
+        """Set the chars per slice value."""
+        value = max(self._min_chars, min(self._max_chars, value))
+        self._chars_per_slice = value
+        if hasattr(self, 'slider_label'):
+            self.slider_label.setText(str(value))
 
 
 class CutpointCard(TaskCard):

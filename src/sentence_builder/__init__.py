@@ -9,6 +9,18 @@ This module provides tools to:
 Uses ChatCore for LLM interactions.
 """
 
-from .reverse_dedup import find_reverse_duplicates, get_duplicate_contexts
+from .reverse_dedup import (
+    TimeReversal,
+    TimestampEntry,
+    find_time_reversals,
+    get_reversal_contexts,
+    parse_timestamp_file,
+)
 
-__all__ = ['find_reverse_duplicates', 'get_duplicate_contexts']
+__all__ = [
+    'TimeReversal',
+    'TimestampEntry',
+    'find_time_reversals',
+    'get_reversal_contexts',
+    'parse_timestamp_file',
+]

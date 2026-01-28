@@ -24,7 +24,7 @@ import sys
 from .tab_interface import TabInterface
 from .styles.style_manager import get_sentence_builder_combined_stylesheet
 from .components.model_selector import ModelSelectorWidget
-from .components.task_card import DeduplicateCard, CutpointCard, AssembleCard
+from .components.task_card import MergeOverlapsCard, CutpointCard, AssembleCard
 from .components.task_popup_window import TaskPopupWindow
 from .flying_message import show_flying_message
 
@@ -36,10 +36,10 @@ if str(src_path) not in sys.path:
 from chatbot_core import ChatCore
 from chatbot_core.thinking_resolver import resolve_thinking
 from sentence_builder.reverse_dedup import (
-    find_reverse_duplicates, 
-    get_duplicate_contexts,
+    find_time_reversals,
+    get_reversal_contexts,
     find_latest_transcription_result,
-    parse_word_timestamps
+    parse_timestamp_file,
 )
 
 
@@ -305,10 +305,10 @@ class TaskCardsSidebarPanel(QFrame):
         card_layout.setSpacing(12)
         
         # Create task cards
-        self.deduplicate_card = DeduplicateCard()
-        self.deduplicate_card.start_clicked.connect(self._on_deduplicate_start)
-        self.deduplicate_card.start_hovered.connect(self._on_start_hover)
-        card_layout.addWidget(self.deduplicate_card)
+        self.merge_overlaps_card = MergeOverlapsCard()
+        self.merge_overlaps_card.start_clicked.connect(self._on_merge_overlaps_start)
+        self.merge_overlaps_card.start_hovered.connect(self._on_start_hover)
+        card_layout.addWidget(self.merge_overlaps_card)
         
         self.cutpoint_card = CutpointCard()
         self.cutpoint_card.start_clicked.connect(self._on_cutpoint_start)
@@ -381,7 +381,7 @@ class TaskCardsSidebarPanel(QFrame):
         
         if self._word_timestamps_file.exists():
             # Count lines
-            words = parse_word_timestamps(str(self._word_timestamps_file))
+            words = parse_timestamp_file(str(self._word_timestamps_file))
             self._total_lines = len(words)
             
             # Update status (truncate long names)
@@ -460,7 +460,7 @@ class TaskCardsSidebarPanel(QFrame):
         try:
             # Each task card reads its own default, but we also constrain the options by scheme.
             tasks = [
-                (self.deduplicate_card, "deduplicate"),
+                (self.merge_overlaps_card, "merge_overlaps"),
                 (self.cutpoint_card, "cutpoint"),
                 (self.assemble_card, "assemble-sentence"),
             ]
@@ -489,61 +489,143 @@ class TaskCardsSidebarPanel(QFrame):
             return False
         return True
     
-    def _create_popup(self, task_name: str, line_range: tuple = None) -> TaskPopupWindow:
-        """Create and configure a popup window."""
-        popup = TaskPopupWindow(task_name, line_range)
+    def _create_popup(self, task_name: str, line_range: tuple = None, needs_approval: bool = False, slice_info: str = None) -> TaskPopupWindow:
+        """Create and configure a popup window with cascading position."""
+        popup = TaskPopupWindow(task_name, line_range, needs_approval=needs_approval, slice_info=slice_info)
         # Use an isolated ChatCore per popup to make concurrent tasks safe.
         popup.set_chat_core(self._create_isolated_chat_core())
         self._popup_windows.append(popup)
         popup.destroyed.connect(lambda: self._popup_windows.remove(popup) if popup in self._popup_windows else None)
+        
+        # Apply cascading offset (like Windows)
+        cascade_offset = 30  # pixels
+        index = len(self._popup_windows) - 1
+        base_x = 100
+        base_y = 100
+        popup.move(base_x + index * cascade_offset, base_y + index * cascade_offset)
+        
         return popup
     
     # =========================================================================
     # Task Handlers
     # =========================================================================
     
-    def _on_deduplicate_start(self):
-        """Handle Deduplicate task start."""
+    def _on_merge_overlaps_start(self):
+        """Handle Merge Overlaps task start with intelligent slicing."""
         if not self._check_model_selected() or not self._check_data_loaded():
             return
         
-        popup = self._create_popup("Deduplicate")
-        popup.show()
+        # Get configuration
+        chars_per_slice = self.merge_overlaps_card.get_chars_per_slice()
+        prompt_template = self.merge_overlaps_card.get_prompt()
+        user_input = self.merge_overlaps_card.get_user_input()
+        thinking_level = self.merge_overlaps_card.get_thinking_level()
         
-        popup.log("Finding duplicate sequences...")
+        # Create initial popup for detection
+        detection_popup = self._create_popup("Merge Overlaps - Detection")
+        detection_popup.show()
         
-        duplicates = find_reverse_duplicates(str(self._word_timestamps_file))
-        popup.log(f"Found {len(duplicates)} duplicate sequences")
+        detection_popup.log("Finding time reversal / overlap regions...")
         
-        if not duplicates:
-            popup.log("No duplicates found - nothing to process")
+        reversals = find_time_reversals(str(self._word_timestamps_file))
+        detection_popup.log(f"Found {len(reversals)} overlap region(s)")
+        
+        if not reversals:
+            detection_popup.log("No overlaps found - nothing to process")
             return
         
-        contexts = get_duplicate_contexts(str(self._word_timestamps_file), duplicates)
+        contexts = get_reversal_contexts(str(self._word_timestamps_file), reversals)
         
-        context_parts = []
-        for ctx in contexts[:10]:
-            context_parts.append(
-                f"=== Duplicate: '{ctx['word']}' (lines {ctx['first_line']}-{ctx['last_line']}) ===\n"
-                f"Time: {ctx['start_time']:.2f}s - {ctx['end_time']:.2f}s\n"
-                f"{ctx['context']}\n"
+        # Build formatted context strings with char length tracking
+        formatted_contexts = []
+        for ctx in contexts:
+            reversal = ctx.get("reversal")
+            try:
+                reversal_line = getattr(reversal, "reversal_line", "?")
+                start_t = getattr(reversal, "reversal_start_time", None)
+                end_t = getattr(reversal, "overlap_end_time", None)
+            except Exception:
+                reversal_line, start_t, end_t = "?", None, None
+
+            time_range = ""
+            if isinstance(start_t, (int, float)) and isinstance(end_t, (int, float)):
+                time_range = f"{start_t:.2f}s - {end_t:.2f}s"
+            elif isinstance(start_t, (int, float)):
+                time_range = f"from {start_t:.2f}s"
+
+            formatted_ctx = (
+                f"=== Overlap Region (reversal line {reversal_line}) ===\n"
+                f"Time: {time_range}\n"
+                f"{ctx.get('context_text', '').strip()}\n"
             )
+            formatted_contexts.append(formatted_ctx)
         
-        context_text = "\n".join(context_parts)
-        popup.set_context(context_text)
+        # Slice contexts into groups based on char limit
+        slices = []
+        current_slice = []
+        current_chars = 0
         
-        prompt_template = self.deduplicate_card.get_prompt()
-        user_input = self.deduplicate_card.get_user_input()
+        for i, ctx_text in enumerate(formatted_contexts):
+            ctx_len = len(ctx_text)
+            
+            # If adding this context exceeds limit and we already have some contexts, start new slice
+            if current_chars + ctx_len > chars_per_slice and current_slice:
+                slices.append(current_slice)
+                current_slice = []
+                current_chars = 0
+            
+            current_slice.append((i, ctx_text))
+            current_chars += ctx_len
         
-        prompt = prompt_template.replace("{user_input}", user_input or "None")
-        prompt = prompt.replace("{context}", context_text)
+        # Add remaining contexts
+        if current_slice:
+            slices.append(current_slice)
         
-        popup.log(f"Sending prompt ({len(prompt)} chars) to LLM...")
-        popup.execute_prompt(
-            prompt,
-            thinking_level=self.deduplicate_card.get_thinking_level(),
-            task_key="deduplicate",
-        )
+        detection_popup.log(f"Split into {len(slices)} slice(s) (max {chars_per_slice} chars per slice)")
+        detection_popup.log(f"Creating {len(slices)} parallel task windows...")
+        detection_popup.close()
+        
+        # Create popup for each slice
+        for slice_idx, slice_contexts in enumerate(slices):
+            slice_num = slice_idx + 1
+            total_slices = len(slices)
+            context_indices = [idx for idx, _ in slice_contexts]
+            
+            slice_info = f"Slice {slice_num}/{total_slices} (overlaps {context_indices[0]+1}-{context_indices[-1]+1})"
+            needs_approval = slice_idx > 0  # First slice auto-approved, rest need approval
+            
+            popup = self._create_popup(
+                "Merge Overlaps",
+                needs_approval=needs_approval,
+                slice_info=slice_info
+            )
+            popup.show()
+            
+            # Build context text for this slice
+            context_text = "\n".join([ctx_text for _, ctx_text in slice_contexts])
+            popup.set_context(context_text)
+            
+            # Build prompt
+            prompt = prompt_template.replace("{user_input}", user_input or "None")
+            prompt = prompt.replace("{context}", context_text)
+            
+            popup.log(f"Slice {slice_num}/{total_slices}")
+            popup.log(f"Processing {len(slice_contexts)} overlap region(s)")
+            popup.log(f"Overlap indices: {[idx+1 for idx in context_indices]}")
+            popup.log(f"Context length: {len(context_text)} chars")
+            popup.log(f"Prompt length: {len(prompt)} chars")
+            
+            if needs_approval:
+                popup.log("⚠️ Waiting for manual approval to proceed...")
+            else:
+                popup.log("✓ Auto-approved (first slice)")
+            
+            # Execute prompt (will wait for approval if needed)
+            popup.execute_prompt(
+                prompt,
+                thinking_level=thinking_level,
+                task_key="merge_overlaps",
+            )
     
     def _on_cutpoint_start(self):
         """Handle Cutpoint task start."""
@@ -569,7 +651,7 @@ class TaskCardsSidebarPanel(QFrame):
         
         cutpoint = cutpoints[0]
         
-        words = parse_word_timestamps(str(self._word_timestamps_file))
+        words = parse_timestamp_file(str(self._word_timestamps_file))
         start_idx = max(0, cutpoint - 50)
         end_idx = min(len(words), cutpoint + 50)
         
@@ -607,7 +689,7 @@ class TaskCardsSidebarPanel(QFrame):
             show_flying_message(self, "No line ranges defined")
             return
         
-        words = parse_word_timestamps(str(self._word_timestamps_file))
+        words = parse_timestamp_file(str(self._word_timestamps_file))
         
         for start_line, end_line in line_ranges:
             popup = self._create_popup("Assemble Sentence", (start_line, end_line))

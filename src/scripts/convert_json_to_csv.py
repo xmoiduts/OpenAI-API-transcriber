@@ -6,12 +6,21 @@
 #   note: the timestamp granularity must be word-level, not segment level.
 # output: a csv file named identical to input, change .json to .csv
 #   format:
-#     word, start, end
+#     start end word
+#   quoting rule:
+#     - do NOT quote normal words
+#     - ONLY quote whitespace-only word (e.g. " ") so the content isn't lost
 
 import json
-import csv
 import sys
 import os
+
+def _format_word_field(word: str) -> str:
+    # Keep consistent with src.asr_postprocess.exporters (offset mode)
+    if word.strip() == "":
+        word_escaped = word.replace('"', '""')
+        return f'"{word_escaped}"'
+    return word
 
 def validate_json_data(data):
     """验证JSON数据的基本结构。"""
@@ -47,16 +56,20 @@ def convert_json_file_to_csv(json_filename):
 
     words = data['words']
 
-    # 写入CSV文件
-    with open(csv_filename, 'w', newline='', encoding='utf-8') as csv_file:
-        csv_writer = csv.writer(csv_file)
-        csv_writer.writerow(["word", "start", "end"])
-        
-        for word_info in words:
-            word = word_info['word']
-            start = round(float(word_info['start']), 2)
-            end = round(float(word_info['end']), 2)
-            csv_writer.writerow([word, start, end])
+    # 写入“起止点”格式（参考 src.asr_postprocess.core 的 offset 导出）
+    # 每行：{start:.2f} {end:.2f} {word_field}
+    rows: list[str] = []
+    for word_info in words:
+        word = str(word_info.get('word', ''))
+        start = float(word_info.get('start', 0.0))
+        end = float(word_info.get('end', 0.0))
+        start_str = f"{start:.2f}"
+        end_str = f"{end:.2f}"
+        word_field = _format_word_field(word)
+        rows.append(f"{start_str} {end_str} {word_field}")
+
+    with open(csv_filename, 'w', encoding='utf-8') as f:
+        f.write("\n".join(rows))
     
     print(f"File '{csv_filename}' created successfully.")
 

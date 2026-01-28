@@ -192,24 +192,36 @@ class TaskPopupWindow(QDialog):
     """
     
     task_completed = pyqtSignal(bool, str)  # success, response
+    gate_approved = pyqtSignal()  # Emitted when gate button is clicked
     
     def __init__(
         self,
         task_name: str,
         line_range: Optional[tuple] = None,
-        parent: Optional[QWidget] = None
+        parent: Optional[QWidget] = None,
+        needs_approval: bool = False,
+        slice_info: Optional[str] = None
     ):
         super().__init__(parent)
         self.task_name = task_name
         self.line_range = line_range
+        self.needs_approval = needs_approval
+        self.slice_info = slice_info
         
         self.chat_core: Optional[ChatCore] = None
         self._worker: Optional[LLMWorker] = None
         self._response_text = ""
         self._thinking_level: Optional[str] = None
         self._task_key: Optional[str] = None
+        self._is_approved = not needs_approval  # Auto-approve if not needed
+        self._pending_prompt = None
+        self._pending_thinking_level = None
+        self._pending_task_key = None
         
-        self.setWindowTitle(f"Task: {task_name}")
+        title = f"Task: {task_name}"
+        if slice_info:
+            title += f" - {slice_info}"
+        self.setWindowTitle(title)
         self.setMinimumSize(600, 500)
         self.setModal(False)  # Allow multiple windows
         
@@ -268,6 +280,16 @@ class TaskPopupWindow(QDialog):
         
         # Button row
         button_layout = QHBoxLayout()
+        
+        # Gate approval button (only show if needs approval)
+        if self.needs_approval:
+            self.approve_button = QPushButton("▶ Approve & Start")
+            self.approve_button.setObjectName("approveButton")
+            self.approve_button.clicked.connect(self._on_approve)
+            button_layout.addWidget(self.approve_button)
+        else:
+            self.approve_button = None
+        
         button_layout.addStretch()
         
         self.stop_button = QPushButton("Stop")
@@ -332,6 +354,17 @@ class TaskPopupWindow(QDialog):
             QPushButton#closeButton:hover {
                 background-color: #555555;
             }
+            QPushButton#approveButton {
+                background-color: #4CAF50;
+                color: white;
+                border: none;
+                border-radius: 4px;
+                padding: 8px 20px;
+                font-weight: bold;
+            }
+            QPushButton#approveButton:hover {
+                background-color: #45a049;
+            }
 
             /* Light scrollbar styling (match app's light theme) */
             QDialog QScrollBar:vertical {
@@ -383,6 +416,14 @@ class TaskPopupWindow(QDialog):
             self.log("Error: No ChatCore instance set")
             return
         
+        # If needs approval and not yet approved, store prompt and wait
+        if self.needs_approval and not self._is_approved:
+            self._pending_prompt = prompt
+            self._pending_thinking_level = thinking_level
+            self._pending_task_key = task_key
+            self.log("Waiting for approval to start...")
+            return
+        
         model = self.chat_core.get_current_model()
         provider = self.chat_core.get_current_provider()
         
@@ -409,6 +450,24 @@ class TaskPopupWindow(QDialog):
         self._worker.error_occurred.connect(self._on_error)
         self._worker.log_message.connect(self.log)
         self._worker.start()
+    
+    def _on_approve(self):
+        """Handle approval button click."""
+        self._is_approved = True
+        if self.approve_button:
+            self.approve_button.setEnabled(False)
+            self.approve_button.setText("✓ Approved")
+        
+        self.gate_approved.emit()
+        
+        # Execute pending prompt if exists
+        if self._pending_prompt:
+            self.execute_prompt(
+                self._pending_prompt,
+                thinking_level=self._pending_thinking_level,
+                task_key=self._pending_task_key
+            )
+            self._pending_prompt = None
     
     def _on_chunk(self, chunk: str):
         """Handle incoming chunk."""

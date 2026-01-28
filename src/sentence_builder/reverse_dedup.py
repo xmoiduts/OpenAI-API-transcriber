@@ -1,20 +1,24 @@
 """
-reverse_dedup.py - Find reverse-order timing duplicates in word timestamps.
+reverse_dedup.py - Detect time reversal points in subtitle timestamps.
 
-Identifies consecutive entries with the same text and close timestamps,
-which often indicate ASR repetition/stuttering that needs deduplication.
+Identifies time reversals caused by segmented transcription overlaps.
+When processing long audio in segments, the segments may overlap in time,
+creating sequences like:
+    1→2→3→...→11 (segment 1)
+    3→4→5→...→13 (segment 2, starts at 3, creating reversal)
+
+This tool detects these reversal points and extracts the overlapping regions
+with padding for manual inspection and deduplication.
 
 Usage:
-    from sentence_builder.reverse_dedup import find_reverse_duplicates
-    
-    duplicates = find_reverse_duplicates("path/to/merged_word_timestamps.csv")
-    contexts = get_duplicate_contexts("path/to/merged_word_timestamps.csv", duplicates)
+    python reverse_dedup.py -i path/to/merged_word_timestamps.csv
+    python reverse_dedup.py  # auto-detect latest transcription result
 """
 
-import re
-from pathlib import Path
-from typing import List, Tuple, Optional
 import sys
+from pathlib import Path
+from typing import List, Tuple, Optional, NamedTuple
+from dataclasses import dataclass
 
 # Add parent to path for imports
 src_path = Path(__file__).parent.parent
@@ -24,7 +28,38 @@ if str(src_path) not in sys.path:
 from scripts.rangetime import parse_line, extract_time_range
 
 
-def parse_word_timestamps(filepath: str) -> List[Tuple[float, float, str, int]]:
+class TimestampEntry(NamedTuple):
+    """A single timestamp entry from the CSV."""
+    start: float
+    end: float
+    text: str
+    line_num: int
+
+
+@dataclass
+class TimeReversal:
+    """Represents a detected time reversal point."""
+    reversal_line: int          # Line number where reversal starts
+    reversal_start_time: float  # Time when reversal begins
+    overlap_end_time: float     # Time when overlap ends (catches up)
+    overlap_end_line: int       # Line number where overlap ends
+    max_time_before: float      # Maximum time before reversal occurred
+    
+    def get_overlap_duration(self) -> float:
+        """Get duration of the overlapping region."""
+        return self.overlap_end_time - self.reversal_start_time
+    
+    def __str__(self) -> str:
+        return (
+            f"Time Reversal at line {self.reversal_line}:\n"
+            f"  Reversal starts: {self.reversal_start_time:.2f}s (was at {self.max_time_before:.2f}s)\n"
+            f"  Overlap region: {self.reversal_start_time:.2f}s - {self.overlap_end_time:.2f}s "
+            f"({self.get_overlap_duration():.2f}s duration)\n"
+            f"  Overlap ends at line: {self.overlap_end_line}"
+        )
+
+
+def parse_timestamp_file(filepath: str) -> List[TimestampEntry]:
     """
     Parse word timestamps CSV file.
     
@@ -32,124 +67,136 @@ def parse_word_timestamps(filepath: str) -> List[Tuple[float, float, str, int]]:
         filepath: Path to merged_word_timestamps.csv
         
     Returns:
-        List of (start_time, end_time, word, line_number) tuples
+        List of TimestampEntry objects
     """
-    words = []
+    entries = []
     with open(filepath, 'r', encoding='utf-8') as f:
         for line_num, line in enumerate(f, 1):
             parsed = parse_line(line)
             if parsed:
-                start, end, word = parsed
-                words.append((start, end, word, line_num))
-    return words
+                start, end, text = parsed
+                entries.append(TimestampEntry(start, end, text, line_num))
+    return entries
 
 
-def find_reverse_duplicates(
+def find_time_reversals(
     filepath: str,
-    time_threshold: float = 2.0,
-    min_word_length: int = 1
-) -> List[Tuple[int, int, str, float, float]]:
+    min_reversal_gap: float = 1.0
+) -> List[TimeReversal]:
     """
-    Find consecutive duplicate words that may indicate ASR repetition.
+    Find all time reversal points in the timestamp file.
     
-    A "reverse duplicate" is when the same word appears multiple times
-    in close succession, often due to ASR hallucination or speaker stuttering.
+    A time reversal occurs when timestamps go backwards, indicating
+    overlapping segments from the transcription process.
     
     Args:
         filepath: Path to merged_word_timestamps.csv
-        time_threshold: Maximum time gap (seconds) between duplicates
-        min_word_length: Minimum word length to consider (filter out single chars)
+        min_reversal_gap: Minimum time gap (seconds) to consider a reversal
+                         Filters out minor jitter in timestamps
         
     Returns:
-        List of (first_line, last_line, word, start_time, end_time) tuples
-        representing duplicate sequences
+        List of TimeReversal objects
     """
-    words = parse_word_timestamps(filepath)
-    if not words:
+    entries = parse_timestamp_file(filepath)
+    if not entries:
         return []
     
-    duplicates = []
+    reversals = []
+    max_end_time = 0.0
     i = 0
     
-    while i < len(words):
-        start_time, end_time, word, line_num = words[i]
+    while i < len(entries):
+        entry = entries[i]
         
-        # Skip whitespace and short words
-        if not word.strip() or len(word.strip()) < min_word_length:
-            i += 1
-            continue
-        
-        # Look for consecutive duplicates
-        j = i + 1
-        while j < len(words):
-            next_start, next_end, next_word, next_line = words[j]
+        # Check if current start time is less than max seen end time
+        # This indicates a time reversal
+        if entry.start < max_end_time - min_reversal_gap:
+            # Found a reversal!
+            reversal_start = entry.start
+            reversal_line = entry.line_num
+            max_before = max_end_time
             
-            # Check if same word and within time threshold
-            if next_word.strip() == word.strip():
-                if next_start - end_time <= time_threshold:
-                    end_time = next_end
-                    j += 1
-                    continue
-            break
-        
-        # If we found duplicates (more than one occurrence)
-        if j > i + 1:
-            first_line = words[i][3]
-            last_line = words[j - 1][3]
-            duplicates.append((
-                first_line,
-                last_line,
-                word.strip(),
-                words[i][0],  # start time of first
-                words[j - 1][1]  # end time of last
+            # Find where the overlap ends (where time catches up)
+            overlap_end_time = reversal_start
+            overlap_end_line = reversal_line
+            overlap_end_index = i
+            
+            # Continue from this entry to find where we catch up
+            for j in range(i, len(entries)):
+                future_entry = entries[j]
+                overlap_end_time = future_entry.end
+                overlap_end_line = future_entry.line_num
+                overlap_end_index = j
+                
+                # If we've caught up to or exceeded the previous max time
+                if future_entry.end >= max_before:
+                    break
+            
+            reversals.append(TimeReversal(
+                reversal_line=reversal_line,
+                reversal_start_time=reversal_start,
+                overlap_end_time=overlap_end_time,
+                overlap_end_line=overlap_end_line,
+                max_time_before=max_before
             ))
-        
-        i = j if j > i + 1 else i + 1
+            
+            # Skip to the end of overlap region to avoid duplicate detections
+            i = overlap_end_index + 1
+            # Update max_end_time to the overlap end time
+            max_end_time = overlap_end_time
+        else:
+            # Normal progression, update max
+            max_end_time = max(max_end_time, entry.end)
+            i += 1
     
-    return duplicates
+    return reversals
 
 
-def get_duplicate_contexts(
+def get_reversal_contexts(
     filepath: str,
-    duplicates: List[Tuple[int, int, str, float, float]],
-    context_seconds: float = 5.0
+    reversals: List[TimeReversal],
+    padding_seconds: float = 10.0
 ) -> List[dict]:
     """
-    Get context around each duplicate sequence using rangetime.
+    Extract text context around each time reversal with padding.
     
     Args:
         filepath: Path to merged_word_timestamps.csv
-        duplicates: List of duplicate tuples from find_reverse_duplicates
-        context_seconds: Seconds of context before and after
+        reversals: List of TimeReversal objects
+        padding_seconds: Seconds to add before/after overlap region
         
     Returns:
-        List of dicts with duplicate info and surrounding context
+        List of dicts containing reversal info and padded context
     """
     results = []
     
-    for first_line, last_line, word, start_time, end_time in duplicates:
-        # Extract context using rangetime
-        context = extract_time_range(
+    for reversal in reversals:
+        # Extract the overlap region with padding
+        context_entries = extract_time_range(
             filepath,
-            start_time,
-            end_time,
-            after_context=context_seconds,
-            before_context=context_seconds
+            start_time=reversal.reversal_start_time,
+            end_time=reversal.overlap_end_time,
+            before_context=padding_seconds,
+            after_context=padding_seconds
         )
         
-        # Format context as text
+        # Format as text
         context_text = "\n".join(
-            f'{s:.2f} {e:.2f} "{w}"' for s, e, w in context
+            f'{start:.2f} {end:.2f} "{text}"'
+            for start, end, text in context_entries
         )
+        
+        # Also get just the words as a readable string
+        text_only = "".join(text for _, _, text in context_entries)
         
         results.append({
-            'first_line': first_line,
-            'last_line': last_line,
-            'word': word,
-            'start_time': start_time,
-            'end_time': end_time,
-            'context': context_text,
-            'context_entries': context
+            'reversal': reversal,
+            'padded_start': reversal.reversal_start_time - padding_seconds,
+            'padded_end': reversal.overlap_end_time + padding_seconds,
+            'context_entries': context_entries,
+            'context_text': context_text,
+            'text_only': text_only,
+            'num_entries': len(context_entries)
         })
     
     return results
@@ -162,18 +209,24 @@ def find_latest_transcription_result() -> Optional[Path]:
     Returns:
         Path to the latest result directory, or None if not found
     """
-    result_base = Path(__file__).parent.parent.parent / 'transcription_result'
+    # Try both possible directory names
+    base_paths = [
+        Path(__file__).parent.parent.parent / 'transcription_result',
+        Path(__file__).parent.parent.parent / 'transcription_results'
+    ]
     
-    if not result_base.exists():
-        return None
-    
-    # Find directories with merged_word_timestamps.csv
     candidates = []
-    for d in result_base.iterdir():
-        if d.is_dir():
-            csv_file = d / 'merged_word_timestamps.csv'
-            if csv_file.exists():
-                candidates.append((csv_file.stat().st_mtime, d))
+    
+    for result_base in base_paths:
+        if not result_base.exists():
+            continue
+        
+        # Find directories with merged_word_timestamps.csv
+        for d in result_base.iterdir():
+            if d.is_dir():
+                csv_file = d / 'merged_word_timestamps.csv'
+                if csv_file.exists():
+                    candidates.append((csv_file.stat().st_mtime, d))
     
     if not candidates:
         return None
@@ -184,15 +237,38 @@ def find_latest_transcription_result() -> Optional[Path]:
 
 
 def main():
-    """CLI entrypoint for testing."""
+    """CLI entrypoint."""
     import argparse
     
-    parser = argparse.ArgumentParser(description='Find duplicate words in ASR output')
-    parser.add_argument('-i', '--input', help='Input CSV file (default: auto-detect latest)')
-    parser.add_argument('-t', '--threshold', type=float, default=2.0,
-                        help='Time threshold for duplicates (default: 2.0s)')
-    parser.add_argument('-c', '--context', type=float, default=5.0,
-                        help='Context seconds around duplicates (default: 5.0s)')
+    parser = argparse.ArgumentParser(
+        description='Detect time reversals in subtitle timestamps',
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog='''
+Examples:
+    # Auto-detect latest transcription result
+    python reverse_dedup.py
+    
+    # Specify input file
+    python reverse_dedup.py -i path/to/merged_word_timestamps.csv
+    
+    # Adjust padding around overlap regions
+    python reverse_dedup.py -p 15.0
+    
+    # Only show time summary (avoid CJK text output)
+    python reverse_dedup.py --summary-only
+        '''
+    )
+    
+    parser.add_argument('-i', '--input',
+                        help='Input CSV file (default: auto-detect latest)')
+    parser.add_argument('-p', '--padding', type=float, default=10.0,
+                        help='Padding seconds around overlap regions (default: 10.0)')
+    parser.add_argument('-g', '--gap', type=float, default=1.0,
+                        help='Minimum reversal gap to detect (default: 1.0s)')
+    parser.add_argument('-v', '--verbose', action='store_true',
+                        help='Show detailed output')
+    parser.add_argument('--summary-only', action='store_true',
+                        help='Only output time summary info, skip all text content (avoids CJK encoding issues)')
     
     args = parser.parse_args()
     
@@ -203,23 +279,47 @@ def main():
         result_dir = find_latest_transcription_result()
         if not result_dir:
             print("Error: No transcription results found", file=sys.stderr)
+            print("Searched in: transcription_result/ and transcription_results/", file=sys.stderr)
             sys.exit(1)
         input_file = str(result_dir / 'merged_word_timestamps.csv')
-        print(f"Using: {input_file}", file=sys.stderr)
+        print(f"Using: {input_file}\n", file=sys.stderr)
     
-    # Find duplicates
-    duplicates = find_reverse_duplicates(input_file, time_threshold=args.threshold)
-    print(f"Found {len(duplicates)} duplicate sequences", file=sys.stderr)
+    # Find reversals
+    reversals = find_time_reversals(input_file, min_reversal_gap=args.gap)
+    
+    if not reversals:
+        print("No time reversals detected!", file=sys.stderr)
+        print("This is good - it means your subtitle timestamps are monotonic.", file=sys.stderr)
+        return
+    
+    print(f"Found {len(reversals)} time reversal(s)\n", file=sys.stderr)
     
     # Get contexts
-    contexts = get_duplicate_contexts(input_file, duplicates, context_seconds=args.context)
+    contexts = get_reversal_contexts(input_file, reversals, padding_seconds=args.padding)
     
-    # Output
-    for ctx in contexts:
-        print(f"\n=== Duplicate: '{ctx['word']}' (lines {ctx['first_line']}-{ctx['last_line']}) ===")
-        print(f"Time: {ctx['start_time']:.2f}s - {ctx['end_time']:.2f}s")
-        print("Context:")
-        print(ctx['context'])
+    # Output results
+    for i, ctx in enumerate(contexts, 1):
+        reversal = ctx['reversal']
+        
+        print(f"{'='*70}")
+        print(f"REVERSAL #{i}")
+        print(f"{'='*70}")
+        print(reversal)
+        print(f"\nPadded time range: {ctx['padded_start']:.2f}s - {ctx['padded_end']:.2f}s")
+        print(f"Total entries in context: {ctx['num_entries']}\n")
+        
+        # Skip text content if summary-only mode
+        if args.summary_only:
+            continue
+        
+        if args.verbose:
+            print("Context with timestamps:")
+            print(ctx['context_text'])
+            print()
+        
+        print("Text only:")
+        print(ctx['text_only'])
+        print()
 
 
 if __name__ == '__main__':

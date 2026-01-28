@@ -17,7 +17,7 @@ gui侧，替换 sentence builder -> chatbot panel （保留panel代码备日后�
 side panel 整体： [upper: scrollable card view; lower: model selector, settings button (placeholder), no start/stop button.]
 
 card view:
-1. name: deduplicate
+1. name: merge overlaps
 interior:
   prompt card (load this task template)
   user prompt input (freetext input)
@@ -38,7 +38,7 @@ interior:
   start button
 
 action:
-    once click start button, pop-up a new window same as deduplicate. 
+    once click start button, pop-up a new window same as merge overlaps. 
     also, we do not process the response now. just log it.
 
 3. name: assemble sentence
