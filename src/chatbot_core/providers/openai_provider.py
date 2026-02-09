@@ -71,6 +71,9 @@ class OpenAIProvider(ChatProvider):
             resolved = resolve_thinking(self.config, thinking_level, task_key=task_key)
             if resolved.openai_params:
                 params.update(resolved.openai_params)
+            if resolved.openai_extra_body:
+                # OpenAI SDK supports this kwarg for vendor extensions (e.g., Qwen enable_thinking)
+                params["extra_body"] = resolved.openai_extra_body
         except Exception as e:
             print(f"[OpenAIProvider] Warning: thinking resolver failed: {e}")
         
@@ -142,6 +145,8 @@ class OpenAIProvider(ChatProvider):
             resolved = resolve_thinking(self.config, thinking_level, task_key=task_key)
             if resolved.openai_params:
                 params.update(resolved.openai_params)
+            if resolved.openai_extra_body:
+                params["extra_body"] = resolved.openai_extra_body
         except Exception as e:
             print(f"[OpenAIProvider] Warning: thinking resolver failed: {e}")
         

@@ -20,6 +20,7 @@ from PyQt5.QtCore import Qt, pyqtSignal, QEvent
 from PyQt5.QtGui import QFont
 from pathlib import Path
 import sys
+import re
 
 from .tab_interface import TabInterface
 from .styles.style_manager import get_sentence_builder_combined_stylesheet
@@ -38,9 +39,11 @@ from chatbot_core.thinking_resolver import resolve_thinking
 from sentence_builder.reverse_dedup import (
     find_time_reversals,
     get_reversal_contexts,
+    get_reversal_segments,
     find_latest_transcription_result,
     parse_timestamp_file,
 )
+from sentence_builder.context_formatter import format_and_retime_context, format_with_source_labeling
 
 
 class SentenceBuilderTab(TabInterface):
@@ -306,7 +309,7 @@ class TaskCardsSidebarPanel(QFrame):
         
         # Create task cards
         self.merge_overlaps_card = MergeOverlapsCard()
-        self.merge_overlaps_card.start_clicked.connect(self._on_merge_overlaps_start)
+        self.merge_overlaps_card.start_clicked.connect(self._on_merge_overlaps_start_v2)
         self.merge_overlaps_card.start_hovered.connect(self._on_start_hover)
         card_layout.addWidget(self.merge_overlaps_card)
         
@@ -537,6 +540,7 @@ class TaskCardsSidebarPanel(QFrame):
         contexts = get_reversal_contexts(str(self._word_timestamps_file), reversals)
         
         # Build formatted context strings with char length tracking
+        # Apply reformat and retime to compress context for LLM
         formatted_contexts = []
         for ctx in contexts:
             reversal = ctx.get("reversal")
@@ -553,10 +557,16 @@ class TaskCardsSidebarPanel(QFrame):
             elif isinstance(start_t, (int, float)):
                 time_range = f"from {start_t:.2f}s"
 
+            # Apply formatting and retiming to context
+            raw_context = ctx.get('context_text', '').strip()
+            reformatted_context, time_offset = format_and_retime_context(raw_context)
+            
+            # Build header with offset info
+            offset_info = f" | Time offset: -{time_offset}s" if time_offset > 0 else ""
             formatted_ctx = (
                 f"=== Overlap Region (reversal line {reversal_line}) ===\n"
-                f"Time: {time_range}\n"
-                f"{ctx.get('context_text', '').strip()}\n"
+                f"Time: {time_range}{offset_info}\n"
+                f"{reformatted_context}\n"
             )
             formatted_contexts.append(formatted_ctx)
         
@@ -627,56 +637,260 @@ class TaskCardsSidebarPanel(QFrame):
                 task_key="merge_overlaps",
             )
     
+    def _on_merge_overlaps_start_v2(self):
+        """Handle Merge Overlaps task with source-labeled formatting (V2).
+        
+        New approach: Instead of concatenating overlapping segments with time reversal,
+        merge them by time-sorting and labeling source (A/B).
+        """
+        if not self._check_model_selected() or not self._check_data_loaded():
+            return
+        
+        # Get configuration
+        chars_per_slice = self.merge_overlaps_card.get_chars_per_slice()
+        prompt_template = self.merge_overlaps_card.get_prompt()
+        user_input = self.merge_overlaps_card.get_user_input()
+        thinking_level = self.merge_overlaps_card.get_thinking_level()
+        
+        # Create initial popup for detection
+        detection_popup = self._create_popup("Merge Overlaps V2 - Detection")
+        detection_popup.show()
+        
+        detection_popup.log("Finding time reversal / overlap regions...")
+        
+        reversals = find_time_reversals(str(self._word_timestamps_file))
+        detection_popup.log(f"Found {len(reversals)} overlap region(s)")
+        
+        if not reversals:
+            detection_popup.log("No overlaps found - nothing to process")
+            return
+        
+        # Get segments with A/B separation
+        segments = get_reversal_segments(str(self._word_timestamps_file), reversals)
+        
+        # Build formatted context strings with source labeling
+        # Also collect line mappings for response conversion
+        formatted_contexts = []
+        context_line_mappings = []  # One mapping dict per context
+        
+        for seg in segments:
+            reversal = seg.get("reversal")
+            segment_a = seg.get("segment_a", [])
+            segment_b = seg.get("segment_b", [])
+            reversal_time = seg.get("reversal_time", 0.0)
+            
+            try:
+                reversal_line = getattr(reversal, "reversal_line", "?")
+                start_t = getattr(reversal, "reversal_start_time", None)
+                end_t = getattr(reversal, "overlap_end_time", None)
+            except Exception:
+                reversal_line, start_t, end_t = "?", None, None
+            
+            time_range = ""
+            if isinstance(start_t, (int, float)) and isinstance(end_t, (int, float)):
+                time_range = f"{start_t:.2f}s - {end_t:.2f}s"
+            elif isinstance(start_t, (int, float)):
+                time_range = f"from {start_t:.2f}s"
+            
+            # Apply source-labeled formatting
+            reformatted_context, time_offset = format_with_source_labeling(
+                segment_a, segment_b, reversal_time
+            )
+            
+            # Build line mapping for this context (for response conversion)
+            from sentence_builder.response_converter import parse_context_to_line_mapping
+            line_mapping = parse_context_to_line_mapping(reformatted_context, time_offset)
+            context_line_mappings.append(line_mapping)
+            
+            # Build header with offset info
+            offset_info = f" | Time offset: -{time_offset}s" if time_offset > 0 else ""
+            formatted_ctx = (
+                f"=== Overlap Region (reversal line {reversal_line}) ===\n"
+                f"Time: {time_range}{offset_info}\n"
+                f"{reformatted_context}\n"
+            )
+            formatted_contexts.append(formatted_ctx)
+        
+        # Slice contexts into groups based on char limit
+        # Also group corresponding line mappings
+        slices = []
+        current_slice = []
+        current_chars = 0
+        
+        for i, ctx_text in enumerate(formatted_contexts):
+            ctx_len = len(ctx_text)
+            
+            # If adding this context exceeds limit and we already have some contexts, start new slice
+            if current_chars + ctx_len > chars_per_slice and current_slice:
+                slices.append(current_slice)
+                current_slice = []
+                current_chars = 0
+            
+            # Store (index, context_text, line_mapping)
+            current_slice.append((i, ctx_text, context_line_mappings[i]))
+            current_chars += ctx_len
+        
+        # Add remaining contexts
+        if current_slice:
+            slices.append(current_slice)
+        
+        detection_popup.log(f"Split into {len(slices)} slice(s) (max {chars_per_slice} chars per slice)")
+        detection_popup.log(f"Creating {len(slices)} parallel task windows...")
+        detection_popup.close()
+        
+        # Create popup for each slice
+        for slice_idx, slice_contexts in enumerate(slices):
+            slice_num = slice_idx + 1
+            total_slices = len(slices)
+            context_indices = [idx for idx, _, _ in slice_contexts]
+            
+            slice_info = f"V2-Slice {slice_num}/{total_slices} (overlaps {context_indices[0]+1}-{context_indices[-1]+1})"
+            needs_approval = slice_idx > 0  # First slice auto-approved, rest need approval
+            
+            popup = self._create_popup(
+                "Merge Overlaps V2",
+                needs_approval=needs_approval,
+                slice_info=slice_info
+            )
+            popup.show()
+            
+            # Build context text for this slice
+            context_text = "\n".join([ctx_text for _, ctx_text, _ in slice_contexts])
+            popup.set_context(context_text)
+            
+            # Group line mappings by offset (to handle multiple regions with same line numbers)
+            # Structure: {offset: {line_num: (start, end, word)}}
+            offset_grouped_mappings = {}
+            for _, ctx_text, line_mapping in slice_contexts:
+                # Extract offset from context header
+                offset_match = re.search(r'Time offset:\s*-(\d+)s', ctx_text)
+                if offset_match:
+                    offset = int(offset_match.group(1))
+                    if offset not in offset_grouped_mappings:
+                        offset_grouped_mappings[offset] = {}
+                    offset_grouped_mappings[offset].update(line_mapping)
+            popup.set_line_mapping(offset_grouped_mappings)
+            
+            # Build prompt
+            prompt = prompt_template.replace("{user_input}", user_input or "None")
+            prompt = prompt.replace("{context}", context_text)
+            
+            popup.log(f"V2-Slice {slice_num}/{total_slices}")
+            popup.log(f"Processing {len(slice_contexts)} overlap region(s)")
+            popup.log(f"Overlap indices: {[idx+1 for idx in context_indices]}")
+            popup.log(f"Context length: {len(context_text)} chars")
+            popup.log(f"Prompt length: {len(prompt)} chars")
+            
+            if needs_approval:
+                popup.log("⚠️ Waiting for manual approval to proceed...")
+            else:
+                popup.log("✓ Auto-approved (first slice)")
+            
+            # Execute prompt (will wait for approval if needed)
+            popup.execute_prompt(
+                prompt,
+                thinking_level=thinking_level,
+                task_key="merge_overlaps",
+            )
+    
     def _on_cutpoint_start(self):
         """Handle Cutpoint task start."""
         if not self._check_model_selected() or not self._check_data_loaded():
             return
-        
-        popup = self._create_popup("Cutpoint")
-        popup.show()
-        
+
+        # ---------------------------------------------------------------------
+        # Plan cutpoints first (detection/planning window)
+        # ---------------------------------------------------------------------
+        planning_popup = self._create_popup("Cutpoint - Planning")
+        planning_popup.show()
+
         lines_per_segment = self.cutpoint_card.get_lines_per_segment()
-        popup.log(f"Lines per segment: {lines_per_segment}")
-        popup.log(f"Total lines: {self._total_lines}")
-        
-        cutpoints = []
-        for i in range(lines_per_segment, self._total_lines, lines_per_segment):
-            cutpoints.append(i)
-        
-        popup.log(f"Planned cutpoints: {cutpoints}")
-        
+        planning_popup.log(f"Lines per segment: {lines_per_segment}")
+        planning_popup.log(f"Total lines: {self._total_lines}")
+
+        cutpoints = list(range(lines_per_segment, self._total_lines, lines_per_segment))
+        planning_popup.log(f"Planned cutpoints: {cutpoints}")
+
         if not cutpoints:
-            popup.log("File too short for cutpoints")
+            planning_popup.log("File too short for cutpoints")
             return
-        
-        cutpoint = cutpoints[0]
-        
+
+        # Parse once and reuse for all windows
         words = parse_timestamp_file(str(self._word_timestamps_file))
-        start_idx = max(0, cutpoint - 50)
-        end_idx = min(len(words), cutpoint + 50)
-        
-        context_lines = []
-        for i in range(start_idx, end_idx):
-            start, end, word, line_num = words[i]
-            marker = " <-- PROPOSED CUTPOINT" if line_num == cutpoint else ""
-            context_lines.append(f"{line_num}: {start:.2f} {end:.2f} \"{word}\"{marker}")
-        
-        context_text = "\n".join(context_lines)
-        popup.set_context(context_text)
-        
         prompt_template = self.cutpoint_card.get_prompt()
         user_input = self.cutpoint_card.get_user_input()
-        
-        prompt = prompt_template.replace("{user_input}", user_input or "None")
-        prompt = prompt.replace("{lines_per_segment}", str(lines_per_segment))
-        prompt = prompt.replace("{context}", context_text)
-        
-        popup.log(f"Sending prompt ({len(prompt)} chars) to LLM...")
-        popup.execute_prompt(
-            prompt,
-            thinking_level=self.cutpoint_card.get_thinking_level(),
-            task_key="cutpoint",
-        )
+        thinking_level = self.cutpoint_card.get_thinking_level()
+
+        planning_popup.log(f"Creating {len(cutpoints)} parallel task windows...")
+        planning_popup.close()
+
+        # ---------------------------------------------------------------------
+        # One send-ctx -> one popup window, with approval gate
+        # ---------------------------------------------------------------------
+        total = len(cutpoints)
+        for ctx_idx, cutpoint in enumerate(cutpoints):
+            ctx_num = ctx_idx + 1
+            needs_approval = ctx_idx > 0  # First ctx auto-approved, rest need approval
+
+            # Cutpoint is a 1-based line number in the timestamp file.
+            # Convert to 0-based list index for slicing.
+            center_idx = max(0, int(cutpoint) - 1)
+            start_idx = max(0, center_idx - 50)
+            end_idx = min(len(words), center_idx + 50)
+
+            slice_info = f"{ctx_num}/{total} (line {cutpoint})"
+            popup = self._create_popup("Cutpoint", needs_approval=needs_approval, slice_info=slice_info)
+            popup.show()
+
+            if center_idx >= len(words):
+                popup.log(f"Cutpoint line {cutpoint} out of range for file (len={len(words)}). Skipping.")
+                continue
+
+            context_lines = []
+            for i in range(start_idx, end_idx):
+                start, end, word, line_num = words[i]
+
+                # Normalize word: only quote spaces, strip quotes from others
+                word_text = str(word)
+                if word_text == "" or word_text.strip() == "":
+                    word_text = '" "'
+
+                # Compress consecutive times: if end == next start, show "~"
+                end_str = f"{end:.2f}"
+                if i < len(words) - 1:
+                    next_start = words[i + 1][0]
+                    if abs(end - next_start) < 0.001:
+                        end_str = "~"
+
+                marker = " // <- PROPOSED CUTPOINT" if line_num == cutpoint else ""
+                # Desired format:
+                # line_num start end_or_~ word_text // optional comment
+                context_lines.append(f"{line_num} {start:.2f} {end_str} {word_text}{marker}")
+
+            context_text = "\n".join(context_lines)
+            popup.set_context(context_text)
+
+            prompt = prompt_template.replace("{user_input}", user_input or "None")
+            prompt = prompt.replace("{lines_per_segment}", str(lines_per_segment))
+            prompt = prompt.replace("{context}", context_text)
+
+            popup.log(f"Cutpoint {ctx_num}/{total}")
+            popup.log(f"Proposed cutpoint line: {cutpoint}")
+            popup.log(f"Context length: {len(context_text)} chars")
+            popup.log(f"Prompt length: {len(prompt)} chars")
+
+            if needs_approval:
+                popup.log("⚠️ Waiting for manual approval to proceed...")
+            else:
+                popup.log("✓ Auto-approved (first ctx)")
+
+            popup.execute_prompt(
+                prompt,
+                thinking_level=thinking_level,
+                task_key="cutpoint",
+            )
+
+            QApplication.processEvents()
     
     def _on_assemble_start(self):
         """Handle Assemble Sentence task start."""

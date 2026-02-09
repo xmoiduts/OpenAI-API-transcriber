@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import os
+import unicodedata
 
 from .utils import find_cut_result_json_files
 
@@ -27,6 +28,32 @@ def _format_offset_word_field(word: str) -> str:
         word_escaped = word.replace('"', '""')
         return f'"{word_escaped}"'
     return word
+
+
+def _is_invisible_only_token(word: str) -> bool:
+    """
+    True if `word` consists ONLY of "invisible" Unicode format characters (category Cf),
+    optionally surrounded by normal whitespace.
+
+    Why:
+    - Some Whisper outputs contain tokens like ZWSP (U+200B) / BOM (U+FEFF) as standalone
+      "words". These are not meaningful and should be removed.
+    - BUT whitespace-only tokens (e.g. a single space) are meaningful in this project and
+      must be preserved (they are quoted as `" "` by `_format_offset_word_field`).
+    """
+    if word == "":
+        # Keep empty tokens as-is to avoid surprising behavior changes; callers may still
+        # quote them if needed.
+        return False
+
+    saw_non_space = False
+    for ch in word:
+        if ch.isspace():
+            continue
+        saw_non_space = True
+        if unicodedata.category(ch) != "Cf":
+            return False
+    return saw_non_space
 
 
 def convert_raw_json_to_csv(target_directory: str, output_filename: str = "word_timestamps.csv") -> str:
@@ -96,7 +123,8 @@ def convert_merged_json_to_csv(target_directory: str, output_filename: str = "me
     if "words" not in data or not isinstance(data["words"], list):
         raise ValueError("No words found in merged JSON file.")
 
-    all_rows: list[str] = []
+    # Step 1: build normalized (start_str, end_str, word) rows and drop invisible-only tokens.
+    rows: list[tuple[str, str, str]] = []
     for word_entry in data["words"]:
         if isinstance(word_entry, (list, tuple)) and len(word_entry) >= 3:
             start_time = float(word_entry[0])
@@ -105,12 +133,33 @@ def convert_merged_json_to_csv(target_directory: str, output_filename: str = "me
 
             start_str = f"{start_time:.2f}"
             end_str = f"{end_time:.2f}"
-            word_field = _format_offset_word_field(word)
 
-            all_rows.append(f"{start_str} {end_str} {word_field}")
+            if _is_invisible_only_token(word):
+                continue
 
-    if not all_rows:
+            rows.append((start_str, end_str, word))
+
+    if not rows:
         raise ValueError("No word timestamps found in merged JSON.")
+
+    # Step 2: merge adjacent rows with identical (start,end) by appending later token to former.
+    # Per requirement: only handle the common 2-line case; do NOT attempt to fold 3+ rows.
+    merged_rows: list[tuple[str, str, str]] = []
+    i = 0
+    while i < len(rows):
+        start_str, end_str, word = rows[i]
+        if i + 1 < len(rows) and rows[i + 1][0] == start_str and rows[i + 1][1] == end_str:
+            word = word + rows[i + 1][2]
+            merged_rows.append((start_str, end_str, word))
+            i += 2
+            continue
+        merged_rows.append((start_str, end_str, word))
+        i += 1
+
+    all_rows: list[str] = []
+    for start_str, end_str, word in merged_rows:
+        word_field = _format_offset_word_field(word)
+        all_rows.append(f"{start_str} {end_str} {word_field}")
 
     output_file_path = os.path.join(target_directory, output_filename)
     with open(output_file_path, "w", encoding="utf-8") as f:

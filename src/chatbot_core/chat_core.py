@@ -100,32 +100,19 @@ class ChatCore:
     def _create_provider(self, config: ResolvedModelConfig) -> Optional[ChatProvider]:
         """Create appropriate provider based on api-scheme.
         
-        Note: For Gemini models accessed through proxy services (aihubmix, openrouter, etc.),
-        the proxy typically exposes an OpenAI-compatible API, not native Gemini SDK format.
-        We detect this case and use OpenAIProvider instead.
+        Routes to native provider implementations based on the configured api-scheme.
+        Proxy services (aihubmix, openrouter, etc.) support native API formats.
         """
         scheme = config.api_scheme
-        
-        # Check if Gemini is going through a proxy service
-        # These services typically use OpenAI-compatible API format
-        PROXY_PROVIDERS = {'aihubmix', 'openrouter', 'together', 'fireworks'}
         
         if scheme == ApiScheme.OPENAI_GPT.value:
             return OpenAIProvider(config)
         elif scheme == ApiScheme.ANTHROPIC_CLAUDE.value:
-            # Claude through proxy services also uses OpenAI-compatible format
-            if config.provider.lower() in PROXY_PROVIDERS:
-                print(f"[ChatCore] Claude via proxy '{config.provider}', using OpenAI-compatible API")
-                return OpenAIProvider(config)
             return ClaudeProvider(config)
         elif scheme == ApiScheme.GOOGLE_GEMINI.value:
-            # Gemini through proxy services uses OpenAI-compatible format
-            if config.provider.lower() in PROXY_PROVIDERS:
-                print(f"[ChatCore] Gemini via proxy '{config.provider}', using OpenAI-compatible API")
-                return OpenAIProvider(config)
             return GeminiProvider(config)
         else:
-            # For unknown schemes, try OpenAI-compatible
+            # For unknown schemes, try OpenAI-compatible as fallback
             print(f"[ChatCore] Unknown scheme '{scheme}', trying OpenAI-compatible")
             return OpenAIProvider(config)
     

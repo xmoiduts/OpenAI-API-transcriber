@@ -167,6 +167,13 @@ class ModelResolver:
         if not isinstance(provider_model_config, dict):
             provider_model_config = {}
         
+        # Allow per-model/provider endpoint override (useful when one provider
+        # hosts multiple API schemes under different path prefixes, e.g.
+        # Gemini at /gemini).
+        endpoint_override = provider_model_config.get('endpoint')
+        if endpoint_override:
+            endpoint = endpoint_override
+
         # Resolve api-name: provider-specific > model key
         api_name = provider_model_config.get('api-name', model_key)
         

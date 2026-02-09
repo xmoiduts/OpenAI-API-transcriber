@@ -27,6 +27,7 @@ NormalizedThinkingLevel = str  # "auto" | "no" | "low" | "mid" | "high"
 SUPPORTED_NORMALIZED_LEVELS: Tuple[NormalizedThinkingLevel, ...] = (
     "auto",
     "no",
+    "yes",
     "low",
     "mid",
     "high",
@@ -41,6 +42,8 @@ class ThinkingResolution:
 
     # Provider-specific payload fragments
     openai_params: Dict[str, Any] = field(default_factory=dict)
+    # For OpenAI-compatible SDKs that accept extra_body (e.g. Qwen enable_thinking)
+    openai_extra_body: Dict[str, Any] = field(default_factory=dict)
     gemini_thinking_config: Dict[str, Any] = field(default_factory=dict)
     anthropic_params: Dict[str, Any] = field(default_factory=dict)
 
@@ -170,6 +173,11 @@ def resolve_thinking_from_scheme(
         param_name = cfg.get("reasoning-effort-param", "reasoning_effort")
         effort_map = cfg.get("level-effort", {}) or {}
 
+        # "yes" is treated as "high" for schemes that don't explicitly support it.
+        if requested_level == "yes":
+            requested_level = "high"
+            effective_level = "high"
+
         if requested_level == "auto":
             return ThinkingResolution(
                 provider_kind=provider_kind,
@@ -186,9 +194,55 @@ def resolve_thinking_from_scheme(
             openai_params={param_name: effort},
         )
 
+    if provider_kind == "openai-extra-body":
+        ocfg = scheme.get("openai-extra-body", {}) or {}
+        param_name = ocfg.get("param-name") or "enable_thinking"
+        level_value = (ocfg.get("level-value", {}) or {}) if isinstance(ocfg, dict) else {}
+
+        # Normalize "low/mid/high" into "yes" for single-toggle thinking models.
+        if requested_level in ("low", "mid", "high"):
+            requested_level = "yes"
+            effective_level = "yes"
+
+        if requested_level == "auto":
+            # Omit (let server default)
+            return ThinkingResolution(
+                provider_kind=provider_kind,
+                effective_level="auto",
+                ui_supported_levels=ui_supported_levels,
+            )
+
+        if requested_level not in ("no", "yes"):
+            requested_level = "auto"
+            effective_level = "auto"
+            return ThinkingResolution(
+                provider_kind=provider_kind,
+                effective_level="auto",
+                ui_supported_levels=ui_supported_levels,
+                warnings=["Unsupported thinking level for openai-extra-body; omitting extra_body."],
+            )
+
+        # Default mapping when config omitted
+        if requested_level == "yes":
+            value = level_value.get("yes", True)
+        else:
+            value = level_value.get("no", False)
+
+        return ThinkingResolution(
+            provider_kind=provider_kind,
+            effective_level=effective_level,
+            ui_supported_levels=ui_supported_levels,
+            openai_extra_body={param_name: value},
+        )
+
     if provider_kind == "google-gemini":
         gcfg = scheme.get("gemini", {}) or {}
         mode = gcfg.get("mode")
+
+        # Best-effort: treat "yes" as "high" for Gemini schemes.
+        if requested_level == "yes":
+            requested_level = "high"
+            effective_level = "high"
 
         if requested_level == "auto":
             if mode == "thinking_budget" and "auto-thinking-budget" in gcfg:
@@ -267,6 +321,11 @@ def resolve_thinking_from_scheme(
 
     if provider_kind == "anthropic":
         acfg = scheme.get("anthropic", {}) or {}
+
+        # Best-effort: treat "yes" as "high" for Anthropic schemes.
+        if requested_level == "yes":
+            requested_level = "high"
+            effective_level = "high"
 
         if requested_level in ("auto", "no"):
             return ThinkingResolution(

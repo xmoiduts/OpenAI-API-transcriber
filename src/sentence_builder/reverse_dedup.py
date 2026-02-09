@@ -202,6 +202,71 @@ def get_reversal_contexts(
     return results
 
 
+def get_reversal_segments(
+    filepath: str,
+    reversals: List[TimeReversal],
+    padding_seconds: float = 10.0
+) -> List[dict]:
+    """
+    Extract overlapping segments as separate A/B sources.
+    
+    For each reversal, extracts:
+    - Segment A: Entries before reversal line (with time-based padding)
+    - Segment B: Entries after reversal line (with time-based padding)
+    
+    This allows source-labeled formatting where both segments are shown
+    in time-sorted order with their origin marked.
+    
+    Args:
+        filepath: Path to merged_word_timestamps.csv
+        reversals: List of TimeReversal objects
+        padding_seconds: Seconds to add before/after the overlap time range
+        
+    Returns:
+        List of dicts containing:
+            - reversal: TimeReversal object
+            - segment_a: List of (start, end, text) tuples from before reversal
+            - segment_b: List of (start, end, text) tuples from after reversal
+    """
+    results = []
+    
+    # Load all entries once
+    all_entries = parse_timestamp_file(filepath)
+    
+    for reversal in reversals:
+        # Time range for filtering (with padding)
+        time_start = reversal.reversal_start_time - padding_seconds
+        time_end = max(reversal.max_time_before, reversal.overlap_end_time) + padding_seconds
+        
+        # Segment A: Entries BEFORE reversal line, within time range
+        segment_a_entries = []
+        for entry in all_entries:
+            if entry.line_num < reversal.reversal_line:
+                # Check if within time range
+                if time_start <= entry.start <= time_end or time_start <= entry.end <= time_end:
+                    segment_a_entries.append((entry.start, entry.end, entry.text))
+        
+        # Segment B: Entries FROM reversal line onwards, within time range
+        segment_b_entries = []
+        for entry in all_entries:
+            if entry.line_num >= reversal.reversal_line:
+                # Check if within time range
+                if time_start <= entry.start <= time_end or time_start <= entry.end <= time_end:
+                    segment_b_entries.append((entry.start, entry.end, entry.text))
+                # Stop when we pass the overlap end line
+                if entry.line_num > reversal.overlap_end_line + 100:  # Some buffer
+                    break
+        
+        results.append({
+            'reversal': reversal,
+            'segment_a': segment_a_entries,
+            'segment_b': segment_b_entries,
+            'reversal_time': reversal.reversal_start_time
+        })
+    
+    return results
+
+
 def find_latest_transcription_result() -> Optional[Path]:
     """
     Find the most recently modified transcription result directory.

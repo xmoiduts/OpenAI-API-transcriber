@@ -35,6 +35,24 @@ class TestThinkingResolver(unittest.TestCase):
         )
         self.assertEqual(res.openai_params.get("reasoning_effort"), "medium")
 
+    def test_openai_extra_body_enable_thinking(self):
+        scheme = {
+            "provider-kind": "openai-extra-body",
+            "openai-extra-body": {
+                "param-name": "enable_thinking",
+                "level-value": {"no": False, "yes": True},
+            },
+        }
+
+        res = resolve_thinking_from_scheme(
+            provider_kind="openai-extra-body",
+            scheme=scheme,
+            max_thinking_tokens=None,
+            requested_level="yes",
+            ui_supported_levels=["no", "yes"],
+        )
+        self.assertEqual(res.openai_extra_body.get("enable_thinking"), True)
+
     def test_gemini_budget_percent_mapping_clamps_min(self):
         scheme = {
             "provider-kind": "google-gemini",

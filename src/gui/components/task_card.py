@@ -76,10 +76,45 @@ class TaskCard(QFrame):
         self.header.setFont(header_font)
         layout.addWidget(self.header)
         
-        # Prompt section
+        # Prompt section with reload button
+        prompt_header = QWidget()
+        prompt_header_layout = QHBoxLayout(prompt_header)
+        prompt_header_layout.setContentsMargins(0, 0, 0, 0)
+        prompt_header_layout.setSpacing(8)
+        
         prompt_label = QLabel("Prompt Template:")
         prompt_label.setObjectName("taskCardLabel")
-        layout.addWidget(prompt_label)
+        prompt_header_layout.addWidget(prompt_label)
+        
+        # Reload button
+        self.reload_prompt_btn = QPushButton("↻")
+        self.reload_prompt_btn.setObjectName("reloadPromptButton")
+        self.reload_prompt_btn.setFixedSize(24, 24)
+        self.reload_prompt_btn.setToolTip("Reload prompt from file")
+        self.reload_prompt_btn.setCursor(Qt.PointingHandCursor)
+        self.reload_prompt_btn.setStyleSheet("""
+            QPushButton#reloadPromptButton {
+                background-color: #f0f0f0;
+                border: 1px solid #d0d0d0;
+                border-radius: 4px;
+                font-size: 16px;
+                font-weight: bold;
+                color: #555555;
+            }
+            QPushButton#reloadPromptButton:hover {
+                background-color: #e0e0e0;
+                border-color: #b0b0b0;
+                color: #333333;
+            }
+            QPushButton#reloadPromptButton:pressed {
+                background-color: #d0d0d0;
+            }
+        """)
+        self.reload_prompt_btn.clicked.connect(self._on_reload_prompt)
+        prompt_header_layout.addWidget(self.reload_prompt_btn)
+        
+        prompt_header_layout.addStretch()
+        layout.addWidget(prompt_header)
         
         self.prompt_edit = QPlainTextEdit()
         self.prompt_edit.setObjectName("taskCardPrompt")
@@ -227,6 +262,17 @@ class TaskCard(QFrame):
         except Exception as e:
             self.prompt_edit.setPlainText(f"# Error loading prompt: {e}")
     
+    def _on_reload_prompt(self):
+        """Handle reload prompt button click."""
+        if self.prompt_file:
+            self.load_prompt(self.prompt_file)
+            # Show visual feedback
+            try:
+                from ..flying_message import show_flying_message
+                show_flying_message(self, f"Prompt reloaded")
+            except ImportError:
+                pass  # Fallback if flying_message not available
+    
     def get_prompt(self) -> str:
         """Get the current prompt template."""
         return self.prompt_edit.toPlainText()
@@ -255,9 +301,15 @@ class TaskCard(QFrame):
             try:
                 root = load_root_config()
                 default_level = get_task_default_thinking_level(root, self.task_key)
-                if default_level and self._combo_has_value(default_level):
-                    self.thinking_combo.setCurrentText(default_level)
-                    return
+                if default_level:
+                    # If a scheme only supports a binary thinking toggle (no/yes),
+                    # map low/mid/high defaults to "yes".
+                    if self._combo_has_value(default_level):
+                        self.thinking_combo.setCurrentText(default_level)
+                        return
+                    if default_level in ("low", "mid", "high") and self._combo_has_value("yes"):
+                        self.thinking_combo.setCurrentText("yes")
+                        return
             except Exception:
                 pass
 
@@ -265,6 +317,8 @@ class TaskCard(QFrame):
         fallback = "low" if self.task_key == "assemble-sentence" else "auto"
         if self._combo_has_value(fallback):
             self.thinking_combo.setCurrentText(fallback)
+        elif fallback in ("low", "mid", "high") and self._combo_has_value("yes"):
+            self.thinking_combo.setCurrentText("yes")
 
     def _combo_has_value(self, value: str) -> bool:
         for i in range(self.thinking_combo.count()):
@@ -299,6 +353,8 @@ class TaskCard(QFrame):
             # preserve selection
             if current and self._combo_has_value(current):
                 self.thinking_combo.setCurrentText(current)
+            elif current in ("low", "mid", "high") and self._combo_has_value("yes"):
+                self.thinking_combo.setCurrentText("yes")
             else:
                 self._apply_default_thinking_level()
         finally:

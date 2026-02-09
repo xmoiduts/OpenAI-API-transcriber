@@ -189,6 +189,7 @@ class TaskPopupWindow(QDialog):
     - Collapsible context section
     - Console log display
     - LLM response display
+    - Optional converted output (for merge overlaps task)
     """
     
     task_completed = pyqtSignal(bool, str)  # success, response
@@ -217,6 +218,13 @@ class TaskPopupWindow(QDialog):
         self._pending_prompt = None
         self._pending_thinking_level = None
         self._pending_task_key = None
+        
+        # For merge overlaps: line number mapping and conversion
+        # Changed to support multiple regions with same line numbers but different offsets
+        self._line_mappings: Optional[dict] = None  # offset -> {line_num -> (start, end, word)}
+        self._conversion_buffer = ""  # Buffer for incremental conversion
+        self._converted_text = ""  # Accumulated converted output
+        self._current_offset = 0  # Track current Time offset during streaming
         
         title = f"Task: {task_name}"
         if slice_info:
@@ -268,15 +276,36 @@ class TaskPopupWindow(QDialog):
         self.log_display.setMinimumHeight(150)
         layout.addWidget(self.log_display)
         
-        # Response section
+        # Response section with character count
+        response_header_layout = QHBoxLayout()
         response_label = QLabel("LLM Response:")
         response_label.setStyleSheet("font-weight: bold; color: #555555;")
-        layout.addWidget(response_label)
+        response_header_layout.addWidget(response_label)
+        
+        response_header_layout.addStretch()
+        
+        self.output_char_count_label = QLabel("Output: 0 chars")
+        self.output_char_count_label.setStyleSheet("color: #888888; font-size: 11px;")
+        response_header_layout.addWidget(self.output_char_count_label)
+        
+        layout.addLayout(response_header_layout)
         
         self.response_display = QTextBrowser()
         self.response_display.setObjectName("responseDisplay")
         self.response_display.setMinimumHeight(150)
         layout.addWidget(self.response_display, 1)  # Stretch
+        
+        # Converted output section (initially hidden, shown during streaming if enabled)
+        self.converted_label = QLabel("Converted Output (Timestamps Restored):")
+        self.converted_label.setStyleSheet("font-weight: bold; color: #555555;")
+        self.converted_label.setVisible(False)
+        layout.addWidget(self.converted_label)
+        
+        self.converted_display = QTextBrowser()
+        self.converted_display.setObjectName("convertedDisplay")
+        self.converted_display.setMinimumHeight(150)
+        self.converted_display.setVisible(False)
+        layout.addWidget(self.converted_display, 1)  # Stretch
         
         # Button row
         button_layout = QHBoxLayout()
@@ -316,7 +345,7 @@ class TaskPopupWindow(QDialog):
                 padding-bottom: 8px;
                 border-bottom: 2px solid #4CAF50;
             }
-            QTextBrowser#contextDisplay, QTextBrowser#logDisplay, QTextBrowser#responseDisplay {
+            QTextBrowser#contextDisplay, QTextBrowser#logDisplay, QTextBrowser#responseDisplay, QTextBrowser#convertedDisplay {
                 background-color: #ffffff;
                 color: #333333;
                 border: 1px solid #d0d0d0;
@@ -326,7 +355,7 @@ class TaskPopupWindow(QDialog):
                 font-size: 11px;
                 selection-background-color: #b3d9ff;
             }
-            QTextBrowser#contextDisplay:focus, QTextBrowser#logDisplay:focus, QTextBrowser#responseDisplay:focus {
+            QTextBrowser#contextDisplay:focus, QTextBrowser#logDisplay:focus, QTextBrowser#responseDisplay:focus, QTextBrowser#convertedDisplay:focus {
                 border: 1px solid #1976d2;
             }
             QPushButton#stopButton {
@@ -395,6 +424,17 @@ class TaskPopupWindow(QDialog):
     def set_context(self, context: str):
         """Set the context text."""
         self.context_display.setPlainText(context)
+    
+    def set_line_mapping(self, line_mapping: dict):
+        """
+        Set line number mapping for response conversion (merge overlaps task).
+        
+        Args:
+            line_mapping: Dict mapping offset -> {line_num -> (original_start, original_end, word)}
+                         This supports multiple regions with different offsets but same line numbers.
+        """
+        self._line_mappings = line_mapping
+        # Conversion will be enabled when streaming starts
     
     def log(self, message: str):
         """Add a log message."""
@@ -471,6 +511,12 @@ class TaskPopupWindow(QDialog):
     
     def _on_chunk(self, chunk: str):
         """Handle incoming chunk."""
+        # Show converted output section on first chunk if line mapping is set
+        if self._line_mappings and not self.converted_display.isVisible():
+            self.converted_label.setVisible(True)
+            self.converted_display.setVisible(True)
+        
+        # Update raw response display
         self._response_text += chunk
         cursor = self.response_display.textCursor()
         cursor.movePosition(QTextCursor.End)
@@ -479,10 +525,39 @@ class TaskPopupWindow(QDialog):
         self.response_display.verticalScrollBar().setValue(
             self.response_display.verticalScrollBar().maximum()
         )
+        
+        # Update output character count
+        self._update_output_char_count()
+        
+        # Convert and update converted output if line mapping is available
+        if self._line_mappings:
+            try:
+                from sentence_builder.response_converter import convert_response_incremental_multiregion
+                converted_chunk, self._conversion_buffer, self._current_offset = convert_response_incremental_multiregion(
+                    chunk, self._line_mappings, self._conversion_buffer, self._current_offset
+                )
+                if converted_chunk:
+                    self._converted_text += converted_chunk
+                    cursor = self.converted_display.textCursor()
+                    cursor.movePosition(QTextCursor.End)
+                    cursor.insertText(converted_chunk)
+                    self.converted_display.setTextCursor(cursor)
+                    self.converted_display.verticalScrollBar().setValue(
+                        self.converted_display.verticalScrollBar().maximum()
+                    )
+            except Exception as e:
+                # Don't break streaming if conversion fails
+                self.log(f"Warning: Conversion error: {e}")
+    
+    def _update_output_char_count(self):
+        """Update the output character count label."""
+        char_count = len(self._response_text)
+        self.output_char_count_label.setText(f"Output: {char_count:,} chars")
     
     def _on_complete(self, response: str):
         """Handle completion."""
         self.stop_button.setEnabled(False)
+        self._update_output_char_count()  # Final update
         self.log("-" * 40)
         self.log("Task completed successfully!")
         self.task_completed.emit(True, response)
