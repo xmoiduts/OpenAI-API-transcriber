@@ -1,6 +1,6 @@
 meta:
   config-version: "1.0"
-  last_updated: "2024-11-17"
+  last_updated: "2026-02-10"
 api:
   # API Token is the unique core, others surround it.
   providers:
@@ -27,6 +27,7 @@ api:
     # Field explanations:
     #   api-scheme: API protocol - determines call method AND output format
     #     - openai-gpt: OpenAI-compatible chat API → markdown output
+    #     - anthropic-claude: Anthropic/Claude API → markdown output
     #     - google-gemini: Google Gemini API → markdown output
     #     - openai-whisper: Whisper transcription API → whisper-json output
     #   additional-capabilities: Extra input modalities (audio-input, image-input)
@@ -36,10 +37,11 @@ api:
     #     - image-analysis: Vision/image understanding
     
     # Example: model with variants (dated versions)
-    claude-4-sonnet: # is api name if not overridden
-      display-name: "Claude 4 Sonnet"
-      api-scheme: "openai-gpt"
+    claude-sonnet-4-5: # is api name if not overridden
+      display-name: "Claude 4.5 Sonnet"
+      api-scheme: "anthropic-claude"
       model-family: "Claude"
+      thinking-level-scheme: "anthropic-default"
       applicable-tasks:
         - text-chat
         - image-analysis
@@ -75,11 +77,38 @@ api:
         openrouter:
           api-name: anthropic/claude-sonnet-4
 
+    claude-haiku-4-5:
+      display-name: "Claude 4.5 Haiku"
+      api-scheme: "anthropic-claude"
+      model-family: "Claude"
+      thinking-level-scheme: "anthropic-default"
+      applicable-tasks:
+        - text-chat
+        - image-analysis
+      max-input-tokens: 204000
+      max-output-tokens: 131000
+      include-max_tokens-above: 4096
+      additional-capabilities:
+        - image-input
+      pricing:
+        input-usd-per-mTok: 1.1
+        output-usd-per-mTok: 5.5
+      parameters:
+        temperature-range: [0.0, 1.0]
+        top-p-range: [0.0, 1.0]
+        default-temperature: None
+        default-top-p: 0.95
+      rate-limit: "medium-concurrent"
+      providers:
+        aihubmix:
+          api-name: claude-haiku-4-5
+
     # Example: model without variants (simple structure)
     deepseek-chat:
       display-name: "DeepSeek V3.2 No-think"
       api-scheme: "openai-gpt"
       model-family: "DeepSeek"
+      thinking-level-scheme: "openai-compatible-default"
       applicable-tasks:
         - text-chat
       max-input-tokens: 128000
@@ -97,12 +126,64 @@ api:
       providers:
         aihubmix:  # api-name omitted, uses model key "deepseek-chat"
 
+    qwen3-max-2026-01-23:
+      display-name: "Qwen3 Max (2026-01-23)"
+      api-scheme: "openai-gpt"
+      model-family: "Qwen"
+      # Qwen3-Max defaults to non-thinking; enable thinking via extra_body.enable_thinking
+      thinking-level-scheme: "qwen-enable-thinking"
+      applicable-tasks:
+        - text-chat
+      max-input-tokens: 252000
+      max-output-tokens: 32000
+      pricing:
+        input-usd-per-mTok: [0.359, 0.574, 1.025]  # [<=32k tokens, >32k tokens, >128k tokens]
+        output-usd-per-mTok: [1.434, 2.294, 4.014]
+        tiered-pricing-thresholds: [32000, 128000, 252000]
+      parameters:
+        temperature-range: [0.0, 2.0]
+        top-p-range: [0.0, 1.0]
+        default-temperature: 1.0
+        default-top-p: 0.95
+      providers:
+        aihubmix:
+          api-name: qwen3-max-2026-01-23
+
+    # Gemini 3 Flash
+    gemini-3-flash-preview:
+      display-name: "Gemini 3 Flash Preview"
+      api-scheme: "google-gemini"
+      model-family: "Gemini"
+      thinking-level-scheme: "google-gemini-3-level"
+      applicable-tasks:
+        - text-chat
+        - audio-transcription
+        - image-analysis
+      max-input-tokens: 1048576
+      max-output-tokens: 65536
+      additional-capabilities:
+        - audio-input
+        - image-input
+      pricing:
+        input-usd-per-mTok: 0.5
+        output-usd-per-mTok: 3
+      parameters:
+        temperature-range: [0.0, 2.0]
+        top-p-range: [0.0, 1.0]
+        default-temperature: 1.0
+        default-top-p: 0.95
+      providers:
+        aihubmix:
+          # per-model/provider endpoint override (Gemini path prefix)
+          endpoint: https://aihubmix.com/gemini
 
     # Gemini 2.5 Pro (tiered pricing example)
     gemini-2.5-pro:
       display-name: "Gemini 2.5 Pro"
       api-scheme: "google-gemini"
       model-family: "Gemini"
+      thinking-level-scheme: "google-gemini-version-2-5-budget"
+      max-thinking-tokens: 32768
       applicable-tasks:
         - text-chat
         - audio-transcription
@@ -123,12 +204,15 @@ api:
         default-top-p: 0.95
       providers:
         aihubmix:  # api-name omitted, uses model key
+          endpoint: https://aihubmix.com/gemini
 
     # Gemini 2.5 Flash
     gemini-2.5-flash:
       display-name: "Gemini 2.5 Flash"
       api-scheme: "google-gemini"
       model-family: "Gemini"
+      thinking-level-scheme: "google-gemini-version-2-5-budget"
+      max-thinking-tokens: 24576
       applicable-tasks:
         - text-chat
         - audio-transcription
@@ -148,12 +232,15 @@ api:
         default-top-p: 0.95
       providers:
         aihubmix:
+          endpoint: https://aihubmix.com/gemini
 
     # Gemini 2.5 Flash-Lite
     gemini-2.5-flash-lite:
       display-name: "Gemini 2.5 Flash-Lite"
       api-scheme: "google-gemini"
       model-family: "Gemini"
+      thinking-level-scheme: "google-gemini-version-2-5-budget"
+      max-thinking-tokens: 24576
       applicable-tasks:
         - text-chat
         - audio-transcription
@@ -173,6 +260,7 @@ api:
         default-top-p: 0.95
       providers:
         aihubmix:
+          endpoint: https://aihubmix.com/gemini
 
     whisper-large-v3:
       display-name: "Whisper Large v3"
@@ -185,6 +273,8 @@ api:
           # rate-limit not implemented
           rate-limit: "medium-concurrent"
           timestamp_granularities: segment # default to word
+        aihubmix:
+          timestamp_granularities: segment
 
     whisper-1:
       display-name: "Whisper Large v2"
@@ -238,7 +328,7 @@ proxies:
     port: 1080
     timeout: 10 # seconds
 
-tasks: # mark this field as needs delete, after implementing the text-audio-in-one model-selector widget then we can do this.
+tasks:
   transcription:
     max_segment_size: 15 # MB
     default_segment_duration: 180 # seconds
@@ -248,6 +338,70 @@ tasks: # mark this field as needs delete, after implementing the text-audio-in-o
         note: openai basic whisper model
       whisper-large-v3:
         note: claimed higher quality than whisper-1, but may be tuned too aggresive
+  sentence-builder:
+    merge_overlaps:
+      default-thinking-level: auto
+    cutpoint:
+      default-thinking-level: auto
+    assemble-sentence:
+      default-thinking-level: low
+    deduplicate:
+      default-thinking-level: auto
+
+thinking-level-schemes:
+  anthropic-default:
+    provider-kind: anthropic
+    supported-levels: [auto, "no", low, mid, high]
+    anthropic:
+      level-budget-percent:
+        low: 0.15
+        mid: 0.35
+        high: 0.70
+      min-enabled-budget: 1024
+
+  qwen-enable-thinking:
+    provider-kind: openai-extra-body
+    supported-levels: ["no", "yes"]
+    openai-extra-body:
+      param-name: enable_thinking
+      level-value:
+        no: false
+        yes: true
+
+  openai-compatible-default:
+    provider-kind: openai-compatible
+    supported-levels: [auto, "no", low, mid, high]
+    openai-compatible:
+      reasoning-effort-param: reasoning_effort
+      level-effort:
+        no: minimal
+        low: low
+        mid: medium
+        high: high
+
+  google-gemini-version-2-5-budget:
+    provider-kind: google-gemini
+    supported-levels: [auto, "no", low, mid, high]
+    gemini:
+      mode: thinking_budget
+      auto-thinking-budget: -1
+      no-thinking-budget: 0
+      level-budget-percent:
+        low: 0.15
+        mid: 0.35
+        high: 0.70
+      min-enabled-budget: 128
+
+  google-gemini-3-level:
+    provider-kind: google-gemini
+    supported-levels: [auto, low, mid, high]
+    gemini:
+      mode: thinking_level
+      level-enum:
+        low: LOW
+        mid: MEDIUM
+        high: HIGH
+      no-fallback-level: MINIMAL
 
 paths:
   tmp_dir: "./tmp_audio_segments"
