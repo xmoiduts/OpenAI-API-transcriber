@@ -11,12 +11,14 @@ Each card contains:
 
 from PyQt5.QtWidgets import (
     QFrame, QVBoxLayout, QHBoxLayout, QLabel, 
-    QPushButton, QPlainTextEdit, QSizePolicy, QWidget, QComboBox
+    QPushButton, QPlainTextEdit, QSizePolicy, QWidget, QComboBox,
+    QLineEdit, QScrollArea
 )
 from PyQt5.QtCore import Qt, pyqtSignal, QEvent
 from PyQt5.QtGui import QFont
 from pathlib import Path
 from typing import Optional, Callable
+import re
 
 try:
     # Optional (used for reading task defaults from config.yaml)
@@ -191,6 +193,14 @@ class TaskCard(QFrame):
         
         button_layout.addWidget(self.start_button)
         layout.addLayout(button_layout)
+
+        # Optional area below Start button for task-specific runtime widgets.
+        self.post_start_container = QWidget()
+        self.post_start_layout = QVBoxLayout(self.post_start_container)
+        self.post_start_layout.setContentsMargins(0, 0, 0, 0)
+        self.post_start_layout.setSpacing(6)
+        self.post_start_container.setVisible(False)
+        layout.addWidget(self.post_start_container)
         
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Minimum)
     
@@ -284,6 +294,11 @@ class TaskCard(QFrame):
     def add_control(self, widget: QWidget):
         """Add a task-specific control widget."""
         self.controls_layout.addWidget(widget)
+
+    def add_post_start_control(self, widget: QWidget):
+        """Add a task-specific widget below the Start button."""
+        self.post_start_layout.addWidget(widget)
+        self.post_start_container.setVisible(True)
     
     def set_enabled(self, enabled: bool):
         """Enable/disable the card."""
@@ -462,6 +477,7 @@ class CutpointCard(TaskCard):
     """Card for the cutpoint task - includes drag slider for lines per segment."""
     
     lines_changed = pyqtSignal(int)  # Emitted when lines per segment changes
+    auto_fill_requested = pyqtSignal()  # Emitted when user asks to fill Assemble ranges
     
     def __init__(self, parent: Optional[QWidget] = None):
         self._lines_per_segment = 3000
@@ -479,6 +495,9 @@ class CutpointCard(TaskCard):
         )
         
         self._init_slider_control()
+        self._result_rows = {}  # key: "start-end" -> row widgets/metadata
+        self._activity_frames = ["⠁", "⠂", "⠄", "⡀", "⢀", "⠠", "⠐", "⠈"]
+        self._init_results_panel()
     
     def _init_slider_control(self):
         """Initialize the drag slider control."""
@@ -558,6 +577,240 @@ class CutpointCard(TaskCard):
         """Set the maximum lines based on file size."""
         self._max_lines = max(self._min_lines, max_lines)
 
+    def _init_results_panel(self):
+        """Initialize runtime result rows shown below Start button."""
+        self.results_scroll = QScrollArea()
+        self.results_scroll.setWidgetResizable(True)
+        self.results_scroll.setMaximumHeight(220)
+        self.results_scroll.setVisible(False)
+        self.results_scroll.setStyleSheet("""
+            QScrollArea {
+                border: 1px solid #e0e0e0;
+                border-radius: 4px;
+                background-color: #fafafa;
+            }
+        """)
+
+        self.results_container = QWidget()
+        self.results_layout = QVBoxLayout(self.results_container)
+        self.results_layout.setContentsMargins(8, 8, 8, 8)
+        self.results_layout.setSpacing(6)
+        self.results_scroll.setWidget(self.results_container)
+        self.add_post_start_control(self.results_scroll)
+
+        # Manual action to push cutpoint results into Assemble card ranges.
+        self.auto_fill_button = QPushButton("Auto Fill Assemble")
+        self.auto_fill_button.setObjectName("cutpointAutoFillButton")
+        self.auto_fill_button.setCursor(Qt.PointingHandCursor)
+        self.auto_fill_button.setStyleSheet("""
+            QPushButton#cutpointAutoFillButton {
+                background-color: #e8f0fe;
+                border: 1px solid #c8dafc;
+                border-radius: 4px;
+                color: #345;
+                padding: 6px 10px;
+                font-size: 12px;
+                font-weight: bold;
+            }
+            QPushButton#cutpointAutoFillButton:hover {
+                background-color: #dfeafe;
+                border-color: #adc7fb;
+            }
+        """)
+        self.auto_fill_button.clicked.connect(self.auto_fill_requested.emit)
+        self.add_post_start_control(self.auto_fill_button)
+
+    def reset_result_rows(self, line_ranges: list):
+        """Rebuild result rows for each cutpoint segment."""
+        self._result_rows = {}
+        while self.results_layout.count() > 0:
+            item = self.results_layout.takeAt(0)
+            if item.widget():
+                item.widget().deleteLater()
+
+        if not line_ranges:
+            self.results_scroll.setVisible(False)
+            return
+
+        for start_line, end_line in line_ranges:
+            row = QWidget()
+            row_layout = QHBoxLayout(row)
+            # Match slider bar vertical density.
+            row_layout.setContentsMargins(0, 4, 0, 4)
+            row_layout.setSpacing(6)
+
+            range_label = QLabel(f"{start_line}-{end_line}")
+            range_label.setStyleSheet("color: #666666; font-size: 12px; min-width: 92px;")
+            row_layout.addWidget(range_label)
+
+            result_input = QLineEdit()
+            result_input.setPlaceholderText("result")
+            result_input.setStyleSheet("""
+                QLineEdit {
+                    background-color: white;
+                    border: 1px solid #d0d0d0;
+                    border-radius: 3px;
+                    padding: 4px 6px;
+                    font-family: Consolas, Monaco, monospace;
+                    font-size: 12px;
+                }
+            """)
+            row_layout.addWidget(result_input, 1)
+
+            confidence_label = QLabel("-")
+            confidence_label.setToolTip("Confidence")
+            confidence_label.setStyleSheet("""
+                QLabel {
+                    color: #666666;
+                    font-size: 12px;
+                    min-width: 56px;
+                }
+            """)
+            row_layout.addWidget(confidence_label)
+
+            status_label = QLabel("⌛")
+            status_label.setToolTip("Running")
+            status_label.setStyleSheet("font-size: 14px; min-width: 18px;")
+            row_layout.addWidget(status_label)
+
+            stream_label = QLabel("⠈")
+            stream_label.setToolTip("Streaming activity")
+            stream_label.setStyleSheet("""
+                QLabel {
+                    color: #7a7a7a;
+                    font-family: Consolas, Monaco, monospace;
+                    font-size: 12px;
+                    min-width: 12px;
+                }
+            """)
+            row_layout.addWidget(stream_label)
+
+            popup_btn = QPushButton("🔍")
+            popup_btn.setFixedSize(28, 24)
+            popup_btn.setToolTip("Open related popup")
+            popup_btn.setStyleSheet("""
+                QPushButton {
+                    background-color: #f0f0f0;
+                    border: 1px solid #d0d0d0;
+                    border-radius: 4px;
+                    font-size: 12px;
+                }
+                QPushButton:hover {
+                    background-color: #e8e8e8;
+                    border-color: #b0b0b0;
+                }
+            """)
+            row_layout.addWidget(popup_btn)
+
+            key = self._line_range_key(start_line, end_line)
+            self._result_rows[key] = {
+                "widget": row,
+                "result_input": result_input,
+                "confidence_label": confidence_label,
+                "status_label": status_label,
+                "stream_label": stream_label,
+                "stream_frame_idx": 0,
+                "popup_button": popup_btn,
+                "popup_ref": None,
+            }
+            self.results_layout.addWidget(row)
+
+        self.results_scroll.setVisible(True)
+
+    def _line_range_key(self, start_line: int, end_line: int) -> str:
+        return f"{start_line}-{end_line}"
+
+    def bind_result_popup(self, line_range: tuple, popup: QWidget):
+        """Bind a row's magnifier button to its popup window."""
+        key = self._line_range_key(line_range[0], line_range[1])
+        row = self._result_rows.get(key)
+        if not row:
+            return
+        row["popup_ref"] = popup
+
+        def _focus_popup():
+            ref = row.get("popup_ref")
+            if not ref:
+                return
+            ref.show()
+            ref.raise_()
+            ref.activateWindow()
+
+        try:
+            row["popup_button"].clicked.disconnect()
+        except Exception:
+            pass
+        row["popup_button"].clicked.connect(_focus_popup)
+
+    def set_result_status(self, line_range: tuple, status: str):
+        """Set row status icon: running/success/error."""
+        key = self._line_range_key(line_range[0], line_range[1])
+        row = self._result_rows.get(key)
+        if not row:
+            return
+        label = row["status_label"]
+        if status == "success":
+            label.setText("✓")
+            label.setToolTip("Success")
+            row["stream_label"].setText(" ")
+        elif status == "error":
+            label.setText("✗")
+            label.setToolTip("Error")
+            row["stream_label"].setText(" ")
+        else:
+            label.setText("⌛")
+            label.setToolTip("Running")
+            row["stream_label"].setText(self._activity_frames[0])
+            row["stream_frame_idx"] = 0
+
+    def set_result_text(self, line_range: tuple, text: str, tooltip: str = ""):
+        """Set editable result field for a row."""
+        key = self._line_range_key(line_range[0], line_range[1])
+        row = self._result_rows.get(key)
+        if not row:
+            return
+        row["result_input"].setText(text or "")
+        if tooltip:
+            row["result_input"].setToolTip(tooltip)
+
+    def set_result_confidence(self, line_range: tuple, confidence: str):
+        """Set confidence text displayed beside result input."""
+        key = self._line_range_key(line_range[0], line_range[1])
+        row = self._result_rows.get(key)
+        if not row:
+            return
+        text = (confidence or "").strip() or "-"
+        row["confidence_label"].setText(text)
+
+    def mark_stream_activity(self, line_range: tuple):
+        """Advance TUI-like activity glyph when new stream data arrives."""
+        key = self._line_range_key(line_range[0], line_range[1])
+        row = self._result_rows.get(key)
+        if not row:
+            return
+        status = row["status_label"].text()
+        if status != "⌛":
+            return
+        idx = (row["stream_frame_idx"] + 1) % len(self._activity_frames)
+        row["stream_frame_idx"] = idx
+        row["stream_label"].setText(self._activity_frames[idx])
+
+    def get_cutpoint_lines(self) -> list:
+        """Read cutpoint line values from result inputs in UI order."""
+        cutpoints = []
+        for row in self._result_rows.values():
+            text = row["result_input"].text().strip()
+            if not text:
+                continue
+            m = re.search(r"\d+", text)
+            if not m:
+                continue
+            try:
+                cutpoints.append(int(m.group(0)))
+            except Exception:
+                continue
+        return cutpoints
+
 
 class AssembleCard(TaskCard):
     """Card for the assemble sentence task - includes editable line range table."""
@@ -576,27 +829,22 @@ class AssembleCard(TaskCard):
     
     def _init_range_table(self):
         """Initialize the line range table."""
-        from PyQt5.QtWidgets import QScrollArea, QLineEdit
-        
-        # Container with scroll
-        scroll = QScrollArea()
-        scroll.setWidgetResizable(True)
-        scroll.setMaximumHeight(150)
-        scroll.setStyleSheet("""
-            QScrollArea {
+        from PyQt5.QtWidgets import QLineEdit
+
+        # Container without scroll: all slicing candidates are expanded inline.
+        self.ranges_container = QWidget()
+        self.ranges_container.setObjectName("assembleRangesContainer")
+        self.ranges_layout = QVBoxLayout(self.ranges_container)
+        self.ranges_layout.setContentsMargins(8, 8, 8, 8)
+        self.ranges_layout.setSpacing(4)
+        self.ranges_container.setStyleSheet("""
+            QWidget#assembleRangesContainer {
                 border: 1px solid #e0e0e0;
                 border-radius: 4px;
                 background-color: #fafafa;
             }
         """)
-        
-        self.ranges_container = QWidget()
-        self.ranges_layout = QVBoxLayout(self.ranges_container)
-        self.ranges_layout.setContentsMargins(8, 8, 8, 8)
-        self.ranges_layout.setSpacing(4)
-        
-        scroll.setWidget(self.ranges_container)
-        self.add_control(scroll)
+        self.add_control(self.ranges_container)
         
         # Add button
         add_btn_container = QWidget()

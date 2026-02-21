@@ -45,4 +45,5 @@ class MainWindow(QMainWindow):
         self.transcription_tab.update_from_other_tab(data)
         self.transcription_new_tab.update_from_other_tab(data)
         self.asr_postprocess_tab.update_from_other_tab(data)
+        self.sentence_builder_tab.update_from_other_tab(data)
 

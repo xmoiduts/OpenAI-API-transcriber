@@ -7,12 +7,15 @@ The following text contains approximately {lines_per_segment} lines of word-by-w
 
 ## Guidelines for Good Cutpoints
 1. End of a complete sentence (after punctuation like 。!? etc.)
+   - A cutpoint should be the ending of a sentence.
 2. Natural pause in speech (indicated by longer time gaps)
 3. Topic or speaker change
 4. Avoid cutting in the middle of:
    - A word
    - A phrase or idiom
    - A sentence
+5. Cutpoint points to the ending of a sentence part,
+   cutpoint+1 line starts a new sentence part.
 
 ## Your Task
 Review the context and suggest the optimal line number for the cutpoint.

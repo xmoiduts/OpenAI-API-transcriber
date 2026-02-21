@@ -194,6 +194,7 @@ class TaskPopupWindow(QDialog):
     
     task_completed = pyqtSignal(bool, str)  # success, response
     gate_approved = pyqtSignal()  # Emitted when gate button is clicked
+    stream_activity = pyqtSignal(str)  # Emitted on streaming/log activity
     
     def __init__(
         self,
@@ -488,7 +489,7 @@ class TaskPopupWindow(QDialog):
         self._worker.chunk_received.connect(self._on_chunk)
         self._worker.response_complete.connect(self._on_complete)
         self._worker.error_occurred.connect(self._on_error)
-        self._worker.log_message.connect(self.log)
+        self._worker.log_message.connect(self._on_worker_log)
         self._worker.start()
     
     def _on_approve(self):
@@ -511,6 +512,8 @@ class TaskPopupWindow(QDialog):
     
     def _on_chunk(self, chunk: str):
         """Handle incoming chunk."""
+        self.stream_activity.emit("chunk")
+
         # Show converted output section on first chunk if line mapping is set
         if self._line_mappings and not self.converted_display.isVisible():
             self.converted_label.setVisible(True)
@@ -548,6 +551,11 @@ class TaskPopupWindow(QDialog):
             except Exception as e:
                 # Don't break streaming if conversion fails
                 self.log(f"Warning: Conversion error: {e}")
+
+    def _on_worker_log(self, message: str):
+        """Handle worker log messages."""
+        self.log(message)
+        self.stream_activity.emit("log")
     
     def _update_output_char_count(self):
         """Update the output character count label."""

@@ -14,20 +14,24 @@ Note: Original Chat Sidebar code is preserved in:
 from PyQt5.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QFrame, QSplitter,
     QTreeWidget, QTreeWidgetItem, QScrollArea, QLabel,
-    QPlainTextEdit, QPushButton, QSizePolicy, QApplication
+    QPlainTextEdit, QPushButton, QSizePolicy, QApplication, QFileDialog
 )
 from PyQt5.QtCore import Qt, pyqtSignal, QEvent
 from PyQt5.QtGui import QFont
 from pathlib import Path
 import sys
 import re
+import os
 
 from .tab_interface import TabInterface
-from .styles.style_manager import get_sentence_builder_combined_stylesheet
+from .styles.style_manager import get_sentence_builder_combined_stylesheet, get_drop_zone_stylesheet
 from .components.model_selector import ModelSelectorWidget
 from .components.task_card import MergeOverlapsCard, CutpointCard, AssembleCard
 from .components.task_popup_window import TaskPopupWindow
 from .flying_message import show_flying_message
+from .util.add_zero_wide_char_to_str import add_zero_wide_char_to_str
+from src.configuration_manager.configuration_manager import ConfigManager
+from src.util.filename_sanitizer import FilenameSanitizer
 
 # Add src to path for imports
 src_path = Path(__file__).parent.parent
@@ -51,6 +55,12 @@ class SentenceBuilderTab(TabInterface):
     
     def __init__(self):
         super().__init__("Sentence Builder")
+        self.target_directory = ""
+        self.pending_directory = ""  # path notified by other tabs, but may not exist yet
+        config_manager = ConfigManager()
+        paths = config_manager.get_paths_config()
+        result_dir = Path(paths.get('result_dir', './transcription_result'))
+        self.filename_sanitizer = FilenameSanitizer(result_dir)
         self.init_ui()
         
     def init_ui(self):
@@ -63,6 +73,9 @@ class SentenceBuilderTab(TabInterface):
         
         # Left: File Tree Panel
         self.file_tree_panel = FileTreePanel()
+        self.file_tree_panel.directorySelected.connect(self._on_directory_selected)
+        self.file_tree_panel.openDirectoryRequested.connect(self._open_directory_dialog)
+        self.file_tree_panel.refreshRequested.connect(self.check_pending_directory)
         self.file_tree_panel.setMinimumWidth(180)
         self.file_tree_panel.setMaximumWidth(350)
         self.splitter.addWidget(self.file_tree_panel)
@@ -83,27 +96,107 @@ class SentenceBuilderTab(TabInterface):
         layout.addWidget(self.splitter)
         
         # Apply styles
-        self.setStyleSheet(get_sentence_builder_combined_stylesheet())
+        self.setStyleSheet(
+            get_sentence_builder_combined_stylesheet() +
+            get_drop_zone_stylesheet()
+        )
+        
+    def _sanitize_filename(self, filename: str) -> str:
+        """Sanitize filename using the same logic as transcriber.py."""
+        return self.filename_sanitizer.sanitize(filename)
+    
+    def _set_loaded_directory(self, directory_path: str, source: str = "manual"):
+        """Load a result directory into all Sentence Builder panels."""
+        if not directory_path:
+            return
+        
+        target = Path(directory_path)
+        if not target.exists() or not target.is_dir():
+            show_flying_message(self, f"Invalid directory: {directory_path}")
+            return
+        
+        self.target_directory = str(target)
+        self.file_tree_panel.set_directory(str(target))
+        self.task_cards_panel.set_result_directory(target)
+        self.file_tree_panel.set_loaded_directory(self.target_directory, source=source)
+        if source == "auto":
+            show_flying_message(self, f"Auto-loaded transcription directory: {target}")
+        else:
+            show_flying_message(self, f"Loaded directory: {target}")
+    
+    def _on_directory_selected(self, directory_path: str):
+        self._set_loaded_directory(directory_path, source="manual")
+    
+    def _open_directory_dialog(self):
+        """Open directory picker to manually load a transcription result."""
+        selected = QFileDialog.getExistingDirectory(
+            self,
+            "Select transcription result directory",
+            self.target_directory or ""
+        )
+        if selected:
+            self._set_loaded_directory(selected, source="manual")
         
     def update_from_other_tab(self, data):
         """Receive data from other tabs."""
-        pass
+        # Priority 1: explicit project/result directory
+        project_dir = data.get("project_dir") or data.get("result_dir")
+        if project_dir:
+            self.pending_directory = str(project_dir)
+            self.check_pending_directory()
+            return
+        
+        # Priority 2: infer result dir from original media file path
+        file_path = data.get("file_path")
+        if file_path:
+            config_manager = ConfigManager()
+            paths = config_manager.get_paths_config()
+            result_dir = Path(paths.get('result_dir', './transcription_result'))
+            input_path = Path(file_path)
+            safe_file_stem = self._sanitize_filename(input_path.stem)
+            transcription_dir = result_dir / safe_file_stem
+            self.pending_directory = str(transcription_dir)
+            self.check_pending_directory()
+    
+    def check_pending_directory(self):
+        """Check if pending directory exists and load when available."""
+        if not self.pending_directory:
+            return
+        
+        pending = Path(self.pending_directory)
+        if pending.exists() and pending.is_dir():
+            self._set_loaded_directory(str(pending), source="auto")
+        else:
+            self.file_tree_panel.set_missing_directory(str(pending))
+    
+    def showEvent(self, event):
+        """Called when the tab becomes visible."""
+        super().showEvent(event)
+        if not self.target_directory:
+            self.check_pending_directory()
 
 
 class FileTreePanel(QFrame):
     """Left panel: File tree with hardcoded expanded folders."""
     
     fileClicked = pyqtSignal(str)  # Emits file path when clicked
+    directorySelected = pyqtSignal(str)
+    openDirectoryRequested = pyqtSignal()
+    refreshRequested = pyqtSignal()
     
     def __init__(self):
         super().__init__()
         self.setObjectName("fileTreePanel")
+        self._current_directory: Path = None
+        self._default_drop_text = "Drag a file or directory here to load project"
+        self._default_drop_hint = self._default_drop_text
         self.init_ui()
+        self.setAcceptDrops(True)
         
     def init_ui(self):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(0)
+        layout.setSpacing(6)
         
         # Header
         header = QLabel("Files")
@@ -111,13 +204,47 @@ class FileTreePanel(QFrame):
         header.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
         header.setFixedHeight(32)
         layout.addWidget(header)
+
+        loader_frame = QFrame()
+        loader_layout = QVBoxLayout(loader_frame)
+        loader_layout.setContentsMargins(8, 0, 8, 0)
+        loader_layout.setSpacing(4)
+
+        self.drop_zone = QLabel(self._default_drop_text)
+        self.drop_zone.setAlignment(Qt.AlignCenter)
+        self.drop_zone.setProperty("dropZone", True)
+        self.drop_zone.setMinimumHeight(70)
+        self.drop_zone.setWordWrap(True)
+        loader_layout.addWidget(self.drop_zone)
+
+        button_row = QHBoxLayout()
+        button_row.setContentsMargins(0, 0, 0, 0)
+        button_row.setSpacing(6)
+
+        self.open_dir_button = QPushButton("Open Directory")
+        self.open_dir_button.setFixedHeight(28)
+        self.open_dir_button.clicked.connect(self.openDirectoryRequested.emit)
+        button_row.addWidget(self.open_dir_button)
+
+        self.refresh_button = QPushButton("↻")
+        self.refresh_button.setFixedSize(36, 28)
+        self.refresh_button.setToolTip("Reload pending directory")
+        self.refresh_button.clicked.connect(self.refreshRequested.emit)
+        button_row.addWidget(self.refresh_button)
+        loader_layout.addLayout(button_row)
+
+        self.loaded_path_label = QLabel("Loaded path: ")
+        self.loaded_path_label.setWordWrap(True)
+        loader_layout.addWidget(self.loaded_path_label)
+
+        layout.addWidget(loader_frame)
         
         # Tree widget
         self.tree = QTreeWidget()
         self.tree.setHeaderHidden(True)
         self.tree.setObjectName("fileTree")
         self.tree.itemClicked.connect(self._on_item_clicked)
-        layout.addWidget(self.tree)
+        layout.addWidget(self.tree, 1)
         
         # Populate with sample structure
         self._populate_sample_tree()
@@ -148,19 +275,116 @@ class FileTreePanel(QFrame):
         """Handle item click - emit signal for files only."""
         # Check if it's a file (no children = leaf node)
         if item.childCount() == 0:
-            # Build path from item hierarchy
-            path_parts = []
-            current = item
-            while current:
-                path_parts.insert(0, current.text(0))
-                current = current.parent()
-            full_path = "/".join(path_parts)
+            full_path = item.data(0, Qt.UserRole)
+            if not full_path:
+                # Fallback for sample tree
+                path_parts = []
+                current = item
+                while current:
+                    path_parts.insert(0, current.text(0))
+                    current = current.parent()
+                full_path = "/".join(path_parts)
             self.fileClicked.emit(full_path)
+
+    def set_loaded_directory(self, directory_path: str, source: str = "manual"):
+        """Update loader UI state for a loaded directory."""
+        display_path = add_zero_wide_char_to_str(directory_path)
+        self.loaded_path_label.setText(f"Loaded path: {display_path}")
+        directory_name = Path(directory_path).name
+        if source == "auto":
+            self.drop_zone.setText(f"Auto-loaded: {directory_name}")
+        else:
+            self.drop_zone.setText(f"Directory loaded: {directory_name}")
+        self._default_drop_hint = self.drop_zone.text()
+
+    def set_missing_directory(self, directory_path: str):
+        """Update loader UI when pending directory was not found."""
+        display_path = add_zero_wide_char_to_str(directory_path)
+        self.loaded_path_label.setText(
+            f"Transcription directory not found: {display_path}\n\n"
+            "Drag any file from the folder to load it."
+        )
+        self.drop_zone.setText("Directory not found - drag any file to load its folder")
+        self._default_drop_hint = self.drop_zone.text()
             
     def set_directory(self, directory_path):
-        """Set the directory to display (for future implementation)."""
-        # TODO: Actually scan directory
-        pass
+        """Set and display a real directory tree."""
+        directory = Path(directory_path)
+        if not directory.exists() or not directory.is_dir():
+            return
+        
+        self._current_directory = directory
+        self.tree.clear()
+        
+        root_item = QTreeWidgetItem(self.tree, [f"{directory.name}/"])
+        root_item.setExpanded(True)
+        root_item.setData(0, Qt.UserRole, str(directory))
+        
+        self._add_directory_items(root_item, directory, depth=0, max_depth=6)
+    
+    def _add_directory_items(self, parent_item, directory: Path, depth: int, max_depth: int):
+        """Recursively add child files/folders with a depth cap for performance."""
+        if depth >= max_depth:
+            return
+        
+        try:
+            children = sorted(
+                list(directory.iterdir()),
+                key=lambda p: (not p.is_dir(), p.name.lower())
+            )
+        except Exception:
+            return
+        
+        for child in children:
+            if child.is_dir():
+                item = QTreeWidgetItem(parent_item, [f"{child.name}/"])
+                item.setData(0, Qt.UserRole, str(child))
+                item.setExpanded(depth < 1)
+                self._add_directory_items(item, child, depth + 1, max_depth)
+            else:
+                item = QTreeWidgetItem(parent_item, [child.name])
+                item.setData(0, Qt.UserRole, str(child))
+
+    def dragEnterEvent(self, event):
+        if event.mimeData().hasUrls():
+            self.drop_zone.setProperty("dragOver", True)
+            self.drop_zone.style().unpolish(self.drop_zone)
+            self.drop_zone.style().polish(self.drop_zone)
+            self.drop_zone.setText("Drop to load")
+            event.acceptProposedAction()
+        else:
+            event.ignore()
+
+    def dragLeaveEvent(self, event):
+        self.drop_zone.setProperty("dragOver", False)
+        self.drop_zone.style().unpolish(self.drop_zone)
+        self.drop_zone.style().polish(self.drop_zone)
+        self.drop_zone.setText(self._default_drop_hint)
+        super().dragLeaveEvent(event)
+
+    def dropEvent(self, event):
+        self.drop_zone.setProperty("dragOver", False)
+        self.drop_zone.style().unpolish(self.drop_zone)
+        self.drop_zone.style().polish(self.drop_zone)
+        urls = event.mimeData().urls()
+        if not urls or not urls[0].isLocalFile():
+            show_flying_message(self, "Could not determine a valid directory.")
+            self.drop_zone.setText(self._default_drop_hint)
+            return
+
+        path = urls[0].toLocalFile()
+        if os.path.isdir(path):
+            target_dir = path
+        elif os.path.isfile(path):
+            target_dir = os.path.dirname(path)
+        else:
+            target_dir = ""
+
+        if target_dir:
+            self.directorySelected.emit(target_dir)
+        else:
+            show_flying_message(self, "Could not determine a valid directory.")
+            self.drop_zone.setText(self._default_drop_hint)
 
 
 class WorkspacePanel(QFrame):
@@ -244,6 +468,8 @@ class TaskCardsSidebarPanel(QFrame):
         
         # Track popup windows
         self._popup_windows: list = []
+        self._cutpoint_run_id: int = 0
+        self._cutpoint_pending_ranges: set = set()
         
         self.init_ui()
         
@@ -316,6 +542,7 @@ class TaskCardsSidebarPanel(QFrame):
         self.cutpoint_card = CutpointCard()
         self.cutpoint_card.start_clicked.connect(self._on_cutpoint_start)
         self.cutpoint_card.start_hovered.connect(self._on_start_hover)
+        self.cutpoint_card.auto_fill_requested.connect(self._on_cutpoint_auto_fill_requested)
         card_layout.addWidget(self.cutpoint_card)
         
         self.assemble_card = AssembleCard()
@@ -406,6 +633,16 @@ class TaskCardsSidebarPanel(QFrame):
                 self.assemble_card.set_line_ranges(ranges)
         else:
             self.status_label.setText(f"Warning: merged_word_timestamps.csv not found")
+    
+    def set_result_directory(self, result_dir: Path):
+        """Public API to set current project directory from outside."""
+        try:
+            path = Path(result_dir)
+        except Exception:
+            return
+        if not path.exists() or not path.is_dir():
+            return
+        self._set_result_directory(path)
     
     def _on_start_hover(self, is_hovering: bool):
         """Handle Start button hover - highlight model selector."""
@@ -798,22 +1035,21 @@ class TaskCardsSidebarPanel(QFrame):
         if not self._check_model_selected() or not self._check_data_loaded():
             return
 
-        # ---------------------------------------------------------------------
-        # Plan cutpoints first (detection/planning window)
-        # ---------------------------------------------------------------------
-        planning_popup = self._create_popup("Cutpoint - Planning")
-        planning_popup.show()
-
         lines_per_segment = self.cutpoint_card.get_lines_per_segment()
-        planning_popup.log(f"Lines per segment: {lines_per_segment}")
-        planning_popup.log(f"Total lines: {self._total_lines}")
-
         cutpoints = list(range(lines_per_segment, self._total_lines, lines_per_segment))
-        planning_popup.log(f"Planned cutpoints: {cutpoints}")
-
         if not cutpoints:
-            planning_popup.log("File too short for cutpoints")
+            show_flying_message(self, "File too short for cutpoint slicing")
             return
+
+        segment_ranges = []
+        for ctx_idx, cutpoint in enumerate(cutpoints):
+            seg_start = ctx_idx * lines_per_segment + 1
+            seg_end = cutpoint
+            segment_ranges.append((seg_start, seg_end))
+        self.cutpoint_card.reset_result_rows(segment_ranges)
+        self._cutpoint_run_id += 1
+        current_run_id = self._cutpoint_run_id
+        self._cutpoint_pending_ranges = set(segment_ranges)
 
         # Parse once and reuse for all windows
         words = parse_timestamp_file(str(self._word_timestamps_file))
@@ -821,16 +1057,14 @@ class TaskCardsSidebarPanel(QFrame):
         user_input = self.cutpoint_card.get_user_input()
         thinking_level = self.cutpoint_card.get_thinking_level()
 
-        planning_popup.log(f"Creating {len(cutpoints)} parallel task windows...")
-        planning_popup.close()
-
         # ---------------------------------------------------------------------
-        # One send-ctx -> one popup window, with approval gate
+        # One send-ctx -> one popup window, auto-start all in background.
         # ---------------------------------------------------------------------
         total = len(cutpoints)
         for ctx_idx, cutpoint in enumerate(cutpoints):
             ctx_num = ctx_idx + 1
-            needs_approval = ctx_idx > 0  # First ctx auto-approved, rest need approval
+            line_range = segment_ranges[ctx_idx]
+            self.cutpoint_card.set_result_status(line_range, "running")
 
             # Cutpoint is a 1-based line number in the timestamp file.
             # Convert to 0-based list index for slicing.
@@ -839,11 +1073,20 @@ class TaskCardsSidebarPanel(QFrame):
             end_idx = min(len(words), center_idx + 50)
 
             slice_info = f"{ctx_num}/{total} (line {cutpoint})"
-            popup = self._create_popup("Cutpoint", needs_approval=needs_approval, slice_info=slice_info)
-            popup.show()
+            popup = self._create_popup("Cutpoint", needs_approval=False, slice_info=slice_info)
+            self.cutpoint_card.bind_result_popup(line_range, popup)
+            popup.task_completed.connect(
+                lambda success, response, lr=line_range, run_id=current_run_id:
+                self._on_cutpoint_task_completed(lr, success, response, run_id)
+            )
+            popup.stream_activity.connect(
+                lambda _source, lr=line_range: self.cutpoint_card.mark_stream_activity(lr)
+            )
 
             if center_idx >= len(words):
                 popup.log(f"Cutpoint line {cutpoint} out of range for file (len={len(words)}). Skipping.")
+                self.cutpoint_card.set_result_status(line_range, "error")
+                self._mark_cutpoint_task_finished(line_range, current_run_id)
                 continue
 
             context_lines = []
@@ -878,11 +1121,7 @@ class TaskCardsSidebarPanel(QFrame):
             popup.log(f"Proposed cutpoint line: {cutpoint}")
             popup.log(f"Context length: {len(context_text)} chars")
             popup.log(f"Prompt length: {len(prompt)} chars")
-
-            if needs_approval:
-                popup.log("⚠️ Waiting for manual approval to proceed...")
-            else:
-                popup.log("✓ Auto-approved (first ctx)")
+            popup.log("✓ Auto-started")
 
             popup.execute_prompt(
                 prompt,
@@ -891,6 +1130,130 @@ class TaskCardsSidebarPanel(QFrame):
             )
 
             QApplication.processEvents()
+
+    def _parse_cutpoint_response(self, response: str) -> dict:
+        """Parse CUTPOINT_LINE / REASON / CONFIDENCE from LLM output."""
+        fields = {
+            "CUTPOINT_LINE": "",
+            "REASON": "",
+            "CONFIDENCE": "",
+        }
+        current_key = None
+
+        for raw_line in response.splitlines():
+            line = raw_line.strip()
+            if not line:
+                continue
+            m = re.match(
+                r'^\s*(?:[-*]\s*)?(?:\*\*)?\s*(CUTPOINT_LINE|REASON|CONFIDENCE)(?:\*\*)?\s*[:：]\s*(.*)\s*$',
+                line,
+                flags=re.IGNORECASE,
+            )
+            if m:
+                current_key = m.group(1).upper()
+                fields[current_key] = m.group(2).strip()
+                continue
+            if current_key:
+                if fields[current_key]:
+                    fields[current_key] += "\n" + line
+                else:
+                    fields[current_key] = line
+
+        cutpoint_line = None
+        line_match = re.search(r"\d+", fields["CUTPOINT_LINE"])
+        if line_match:
+            try:
+                cutpoint_line = int(line_match.group(0))
+            except Exception:
+                cutpoint_line = None
+
+        return {
+            "cutpoint_line": cutpoint_line,
+            "reason": fields["REASON"].strip(),
+            "confidence": fields["CONFIDENCE"].strip(),
+        }
+
+    def _on_cutpoint_task_completed(self, line_range: tuple, success: bool, response: str, run_id: int = None):
+        """Handle one cutpoint popup completion and update result row."""
+        if run_id is not None and run_id != self._cutpoint_run_id:
+            return
+
+        if not success:
+            self.cutpoint_card.set_result_status(line_range, "error")
+            self.cutpoint_card.set_result_text(line_range, "", tooltip=response)
+            self.cutpoint_card.set_result_confidence(line_range, "")
+            self._mark_cutpoint_task_finished(line_range, run_id)
+            return
+
+        parsed = self._parse_cutpoint_response(response or "")
+        if parsed["cutpoint_line"] is None:
+            self.cutpoint_card.set_result_status(line_range, "error")
+            fallback = (response or "").strip().splitlines()
+            self.cutpoint_card.set_result_text(
+                line_range,
+                fallback[0][:80] if fallback else "",
+                tooltip=response or "",
+            )
+            self.cutpoint_card.set_result_confidence(line_range, parsed["confidence"])
+            self._mark_cutpoint_task_finished(line_range, run_id)
+            return
+
+        self.cutpoint_card.set_result_text(
+            line_range,
+            str(parsed["cutpoint_line"]),
+            tooltip=f"Reason: {parsed['reason']}" if parsed["reason"] else "",
+        )
+        self.cutpoint_card.set_result_confidence(line_range, parsed["confidence"])
+        self.cutpoint_card.set_result_status(line_range, "success")
+        self._mark_cutpoint_task_finished(line_range, run_id)
+
+    def _mark_cutpoint_task_finished(self, line_range: tuple, run_id: int = None):
+        """Track cutpoint completion and trigger auto-fill when all are done."""
+        if run_id is not None and run_id != self._cutpoint_run_id:
+            return
+        if line_range in self._cutpoint_pending_ranges:
+            self._cutpoint_pending_ranges.remove(line_range)
+        if not self._cutpoint_pending_ranges:
+            applied = self._apply_cutpoint_results_to_assemble(silent=False)
+            if applied:
+                show_flying_message(self, "Auto-filled Assemble slicing from Cutpoint results")
+
+    def _on_cutpoint_auto_fill_requested(self):
+        """Handle manual auto-fill button click on cutpoint card."""
+        applied = self._apply_cutpoint_results_to_assemble(silent=False)
+        if applied:
+            show_flying_message(self, "Assemble slicing updated from Cutpoint results")
+        else:
+            show_flying_message(self, "No valid cutpoint results to fill")
+
+    def _apply_cutpoint_results_to_assemble(self, silent: bool = True) -> bool:
+        """Convert cutpoint result lines into Assemble line ranges."""
+        if self._total_lines <= 0:
+            return False
+
+        raw_cutpoints = self.cutpoint_card.get_cutpoint_lines()
+        valid = sorted({
+            cp for cp in raw_cutpoints
+            if isinstance(cp, int) and 1 <= cp < self._total_lines
+        })
+        if not valid:
+            return False
+
+        ranges = []
+        start_line = 1
+        for cp in valid:
+            if cp < start_line:
+                continue
+            ranges.append((start_line, cp))
+            start_line = cp + 1
+        if start_line <= self._total_lines:
+            ranges.append((start_line, self._total_lines))
+
+        if not ranges:
+            return False
+
+        self.assemble_card.set_line_ranges(ranges)
+        return True
     
     def _on_assemble_start(self):
         """Handle Assemble Sentence task start."""
