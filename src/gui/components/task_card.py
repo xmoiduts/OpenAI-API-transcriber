@@ -813,25 +813,68 @@ class CutpointCard(TaskCard):
 
 
 class AssembleCard(TaskCard):
-    """Card for the assemble sentence task - includes editable line range table."""
-    
+    """Card for the assemble sentence task.
+
+    Contains:
+    - Editable line-range table
+    - Max-line-length & over-limit-% draggable sliders (for auto-quench)
+    - Summary result rows with per-row Start/Stop/Retry button
+    """
+
+    row_action_requested = pyqtSignal(tuple, str)  # (line_range, action)  action: "start"|"stop"|"retry"
+
+    _SLIDER_CSS = """
+        QLabel#{obj_name} {{
+            background-color: #f0f0f0;
+            border: 1px solid #d0d0d0;
+            border-radius: 4px;
+            padding: 4px 12px;
+            font-family: Consolas, Monaco, monospace;
+            font-weight: bold;
+            min-width: 60px;
+        }}
+        QLabel#{obj_name}:hover {{
+            background-color: #e8e8e8;
+            border-color: #b0b0b0;
+        }}
+    """
+
     def __init__(self, parent: Optional[QWidget] = None):
-        self._line_ranges: list = []  # List of (start, end) tuples
-        
+        self._line_ranges: list = []
+
+        # Slider state – max line length
+        self._max_line_length: float = 50.0
+        self._ml_min, self._ml_max = 10.0, 120.0
+        # Slider state – over-limit percentage
+        self._max_over_pct: float = 12.5
+        self._op_min, self._op_max = 1.0, 50.0
+        # Drag bookkeeping (shared across two sliders via _active_slider)
+        self._drag_start_x = 0
+        self._drag_start_value = 0.0
+        self._is_dragging = False
+        self._active_slider: Optional[str] = None
+
+        self._result_rows: dict = {}
+        self._activity_frames = ["⠁", "⠂", "⠄", "⡀", "⢀", "⠠", "⠐", "⠈"]
+
         super().__init__(
             task_name="Assemble Sentence",
             task_key="assemble-sentence",
-            prompt_file="prompts/sentence-rebuild/assemble.txt",
-            parent=parent
+            prompt_file="prompts/sentence-rebuild/assemble_new.txt",
+            parent=parent,
         )
-        
+
         self._init_range_table()
-    
+        self._init_slider_controls()
+        self._init_results_panel()
+
+    # =====================================================================
+    # Range table
+    # =====================================================================
+
     def _init_range_table(self):
-        """Initialize the line range table."""
         from PyQt5.QtWidgets import QLineEdit
 
-        # Container without scroll: all slicing candidates are expanded inline.
         self.ranges_container = QWidget()
         self.ranges_container.setObjectName("assembleRangesContainer")
         self.ranges_layout = QVBoxLayout(self.ranges_container)
@@ -845,51 +888,40 @@ class AssembleCard(TaskCard):
             }
         """)
         self.add_control(self.ranges_container)
-        
-        # Add button
+
         add_btn_container = QWidget()
         add_btn_layout = QHBoxLayout(add_btn_container)
         add_btn_layout.setContentsMargins(0, 4, 0, 0)
-        
+
         self.add_range_btn = QPushButton("+")
         self.add_range_btn.setObjectName("addRangeButton")
         self.add_range_btn.setFixedSize(30, 30)
         self.add_range_btn.setStyleSheet("""
             QPushButton#addRangeButton {
-                background-color: #e8e8e8;
-                border: 1px solid #d0d0d0;
-                border-radius: 4px;
-                font-size: 16px;
-                font-weight: bold;
+                background-color: #e8e8e8; border: 1px solid #d0d0d0;
+                border-radius: 4px; font-size: 16px; font-weight: bold;
             }
-            QPushButton#addRangeButton:hover {
-                background-color: #d8d8d8;
-            }
+            QPushButton#addRangeButton:hover { background-color: #d8d8d8; }
         """)
         self.add_range_btn.clicked.connect(self._add_range_row)
         add_btn_layout.addWidget(self.add_range_btn)
         add_btn_layout.addStretch()
-        
         self.add_control(add_btn_container)
-        
-        # Add initial row
+
         self._add_range_row(1, 1000)
-    
+
     def _add_range_row(self, start: int = None, end: int = None):
-        """Add a new line range row."""
         from PyQt5.QtWidgets import QLineEdit
-        
+
         row_widget = QWidget()
         row_layout = QHBoxLayout(row_widget)
         row_layout.setContentsMargins(0, 0, 0, 0)
         row_layout.setSpacing(4)
-        
-        # "line" label
+
         line_label = QLabel("line")
         line_label.setStyleSheet("color: #666666; font-size: 13px;")
         row_layout.addWidget(line_label)
-        
-        # Start input
+
         start_input = QLineEdit()
         start_input.setObjectName("rangeInput")
         start_input.setFixedWidth(60)
@@ -898,21 +930,17 @@ class AssembleCard(TaskCard):
             start_input.setText(str(start))
         start_input.setStyleSheet("""
             QLineEdit#rangeInput {
-                background-color: white;
-                border: 1px solid #d0d0d0;
-                border-radius: 3px;
-                padding: 2px 4px;
+                background-color: white; border: 1px solid #d0d0d0;
+                border-radius: 3px; padding: 2px 4px;
                 font-family: Consolas, Monaco, monospace;
             }
         """)
         row_layout.addWidget(start_input)
-        
-        # Dash
+
         dash_label = QLabel("-")
         dash_label.setStyleSheet("color: #666666;")
         row_layout.addWidget(dash_label)
-        
-        # End input
+
         end_input = QLineEdit()
         end_input.setObjectName("rangeInput")
         end_input.setFixedWidth(60)
@@ -921,78 +949,346 @@ class AssembleCard(TaskCard):
             end_input.setText(str(end))
         end_input.setStyleSheet("""
             QLineEdit#rangeInput {
-                background-color: white;
-                border: 1px solid #d0d0d0;
-                border-radius: 3px;
-                padding: 2px 4px;
+                background-color: white; border: 1px solid #d0d0d0;
+                border-radius: 3px; padding: 2px 4px;
                 font-family: Consolas, Monaco, monospace;
             }
         """)
         row_layout.addWidget(end_input)
-        
+
         row_layout.addStretch()
-        
-        # Remove button
+
         remove_btn = QPushButton("-")
         remove_btn.setObjectName("removeRangeButton")
         remove_btn.setFixedSize(24, 24)
         remove_btn.setStyleSheet("""
             QPushButton#removeRangeButton {
-                background-color: #ffcccc;
-                border: 1px solid #ffaaaa;
-                border-radius: 3px;
-                font-weight: bold;
+                background-color: #ffcccc; border: 1px solid #ffaaaa;
+                border-radius: 3px; font-weight: bold;
             }
-            QPushButton#removeRangeButton:hover {
-                background-color: #ffbbbb;
-            }
+            QPushButton#removeRangeButton:hover { background-color: #ffbbbb; }
         """)
         remove_btn.clicked.connect(lambda: self._remove_range_row(row_widget))
         row_layout.addWidget(remove_btn)
-        
-        # Store references
+
         row_widget.start_input = start_input
         row_widget.end_input = end_input
-        
         self.ranges_layout.addWidget(row_widget)
-    
+
     def _remove_range_row(self, row_widget: QWidget):
-        """Remove a line range row."""
-        # Keep at least one row
         if self.ranges_layout.count() <= 1:
             return
-        
         self.ranges_layout.removeWidget(row_widget)
         row_widget.deleteLater()
-    
+
     def get_line_ranges(self) -> list:
-        """Get all line ranges as list of (start, end) tuples."""
         ranges = []
         for i in range(self.ranges_layout.count()):
             item = self.ranges_layout.itemAt(i)
             if item and item.widget():
                 widget = item.widget()
-                if hasattr(widget, 'start_input') and hasattr(widget, 'end_input'):
+                if hasattr(widget, "start_input") and hasattr(widget, "end_input"):
                     try:
-                        start = int(widget.start_input.text())
-                        end = int(widget.end_input.text())
-                        ranges.append((start, end))
+                        ranges.append((int(widget.start_input.text()), int(widget.end_input.text())))
                     except ValueError:
-                        pass  # Skip invalid entries
+                        pass
         return ranges
-    
+
     def set_line_ranges(self, ranges: list):
-        """Set line ranges from list of (start, end) tuples."""
-        # Clear existing rows
         while self.ranges_layout.count() > 0:
             item = self.ranges_layout.takeAt(0)
             if item.widget():
                 item.widget().deleteLater()
-        
-        # Add new rows
-        for start, end in ranges:
-            self._add_range_row(start, end)
-        
-        # Ensure at least one row
+        for s, e in ranges:
+            self._add_range_row(s, e)
         if not ranges:
             self._add_range_row()
+
+    # =====================================================================
+    # Config sliders (max line length + over-limit %)
+    # =====================================================================
+
+    def _init_slider_controls(self):
+        # --- Max line length ---
+        ml_container = QWidget()
+        ml_layout = QHBoxLayout(ml_container)
+        ml_layout.setContentsMargins(0, 4, 0, 4)
+        ml_label = QLabel("Max line length:")
+        ml_label.setStyleSheet("color: #666666; font-size: 13px;")
+        ml_layout.addWidget(ml_label)
+
+        self.ml_slider_label = QLabel(str(self._max_line_length))
+        self.ml_slider_label.setObjectName("assembleMLSlider")
+        self.ml_slider_label.setStyleSheet(
+            self._SLIDER_CSS.format(obj_name="assembleMLSlider")
+        )
+        self.ml_slider_label.setCursor(Qt.SizeHorCursor)
+        self.ml_slider_label.setMouseTracking(True)
+        self.ml_slider_label.installEventFilter(self)
+        ml_layout.addWidget(self.ml_slider_label)
+        ml_layout.addStretch()
+        self.add_control(ml_container)
+
+        # --- Over-limit percentage ---
+        op_container = QWidget()
+        op_layout = QHBoxLayout(op_container)
+        op_layout.setContentsMargins(0, 4, 0, 4)
+        op_label = QLabel("Over-limit fail %:")
+        op_label.setStyleSheet("color: #666666; font-size: 13px;")
+        op_layout.addWidget(op_label)
+
+        self.op_slider_label = QLabel(f"{self._max_over_pct}%")
+        self.op_slider_label.setObjectName("assembleOPSlider")
+        self.op_slider_label.setStyleSheet(
+            self._SLIDER_CSS.format(obj_name="assembleOPSlider")
+        )
+        self.op_slider_label.setCursor(Qt.SizeHorCursor)
+        self.op_slider_label.setMouseTracking(True)
+        self.op_slider_label.installEventFilter(self)
+        op_layout.addWidget(self.op_slider_label)
+        op_layout.addStretch()
+        self.add_control(op_container)
+
+    def get_max_line_length(self) -> float:
+        return self._max_line_length
+
+    def get_max_over_limit_pct(self) -> float:
+        return self._max_over_pct
+
+    # =====================================================================
+    # Drag event filter (shared by start-button hover + two sliders)
+    # =====================================================================
+
+    def eventFilter(self, obj, event):
+        slider_map = {}
+        if hasattr(self, "ml_slider_label"):
+            slider_map[id(self.ml_slider_label)] = "ml"
+        if hasattr(self, "op_slider_label"):
+            slider_map[id(self.op_slider_label)] = "op"
+
+        slider_id = slider_map.get(id(obj))
+        if slider_id is not None:
+            if event.type() == QEvent.MouseButtonPress and event.button() == Qt.LeftButton:
+                self._is_dragging = True
+                self._active_slider = slider_id
+                self._drag_start_x = event.globalX()
+                self._drag_start_value = (
+                    self._max_line_length if slider_id == "ml" else self._max_over_pct
+                )
+                return True
+            elif event.type() == QEvent.MouseMove and self._is_dragging and self._active_slider == slider_id:
+                delta_x = event.globalX() - self._drag_start_x
+                if slider_id == "ml":
+                    new_val = self._drag_start_value + (delta_x / 10) * 1
+                    new_val = max(self._ml_min, min(self._ml_max, round(new_val, 1)))
+                    if new_val != self._max_line_length:
+                        self._max_line_length = new_val
+                        self.ml_slider_label.setText(str(new_val))
+                else:
+                    new_val = self._drag_start_value + (delta_x / 10) * 0.5
+                    new_val = max(self._op_min, min(self._op_max, round(new_val, 1)))
+                    if new_val != self._max_over_pct:
+                        self._max_over_pct = new_val
+                        self.op_slider_label.setText(f"{new_val}%")
+                return True
+            elif event.type() == QEvent.MouseButtonRelease and event.button() == Qt.LeftButton:
+                if self._is_dragging and self._active_slider == slider_id:
+                    self._is_dragging = False
+                    self._active_slider = None
+                    return True
+
+        return super().eventFilter(obj, event)
+
+    # =====================================================================
+    # Summary result rows (below Start button)
+    # =====================================================================
+
+    def _init_results_panel(self):
+        self.results_scroll = QScrollArea()
+        self.results_scroll.setWidgetResizable(True)
+        self.results_scroll.setMaximumHeight(280)
+        self.results_scroll.setVisible(False)
+        self.results_scroll.setStyleSheet("""
+            QScrollArea {
+                border: 1px solid #e0e0e0;
+                border-radius: 4px;
+                background-color: #fafafa;
+            }
+        """)
+
+        self.results_container = QWidget()
+        self.results_layout = QVBoxLayout(self.results_container)
+        self.results_layout.setContentsMargins(8, 8, 8, 8)
+        self.results_layout.setSpacing(6)
+        self.results_scroll.setWidget(self.results_container)
+        self.add_post_start_control(self.results_scroll)
+
+    def _line_range_key(self, start_line: int, end_line: int) -> str:
+        return f"{start_line}-{end_line}"
+
+    def reset_result_rows(self, line_ranges: list):
+        """Rebuild summary rows. Each row: [range, status, stream, magnifier, action-btn]."""
+        self._result_rows = {}
+        while self.results_layout.count() > 0:
+            item = self.results_layout.takeAt(0)
+            if item.widget():
+                item.widget().deleteLater()
+
+        if not line_ranges:
+            self.results_scroll.setVisible(False)
+            return
+
+        _action_btn_css = """
+            QPushButton {
+                background-color: #e8e8e8; border: 1px solid #d0d0d0;
+                border-radius: 4px; font-size: 11px; padding: 2px 8px;
+            }
+            QPushButton:hover { background-color: #d8d8d8; }
+        """
+
+        for start_line, end_line in line_ranges:
+            row = QWidget()
+            row_layout = QHBoxLayout(row)
+            row_layout.setContentsMargins(0, 4, 0, 4)
+            row_layout.setSpacing(6)
+
+            range_label = QLabel(f"{start_line}-{end_line}")
+            range_label.setStyleSheet("color: #666666; font-size: 12px; min-width: 92px;")
+            row_layout.addWidget(range_label)
+
+            status_label = QLabel("—")
+            status_label.setToolTip("Untriggered")
+            status_label.setStyleSheet("font-size: 14px; min-width: 18px;")
+            row_layout.addWidget(status_label)
+
+            stream_label = QLabel(" ")
+            stream_label.setToolTip("Streaming activity")
+            stream_label.setStyleSheet("""
+                QLabel {
+                    color: #7a7a7a; font-family: Consolas, Monaco, monospace;
+                    font-size: 12px; min-width: 12px;
+                }
+            """)
+            row_layout.addWidget(stream_label)
+
+            row_layout.addStretch()
+
+            popup_btn = QPushButton("\U0001F50D")
+            popup_btn.setFixedSize(28, 24)
+            popup_btn.setToolTip("Open related popup")
+            popup_btn.setStyleSheet("""
+                QPushButton {
+                    background-color: #f0f0f0; border: 1px solid #d0d0d0;
+                    border-radius: 4px; font-size: 12px;
+                }
+                QPushButton:hover { background-color: #e8e8e8; border-color: #b0b0b0; }
+            """)
+            row_layout.addWidget(popup_btn)
+
+            action_btn = QPushButton("Start")
+            action_btn.setFixedHeight(24)
+            action_btn.setMinimumWidth(56)
+            action_btn.setStyleSheet(_action_btn_css)
+            lr = (start_line, end_line)
+            action_btn.clicked.connect(lambda _checked=False, _lr=lr: self._on_action_btn(_lr))
+            row_layout.addWidget(action_btn)
+
+            key = self._line_range_key(start_line, end_line)
+            self._result_rows[key] = {
+                "widget": row,
+                "status_label": status_label,
+                "stream_label": stream_label,
+                "stream_frame_idx": 0,
+                "popup_button": popup_btn,
+                "popup_ref": None,
+                "action_button": action_btn,
+                "state": "untriggered",  # untriggered | working | finished | interrupted
+            }
+            self.results_layout.addWidget(row)
+
+        self.results_scroll.setVisible(True)
+
+    def _on_action_btn(self, line_range: tuple):
+        key = self._line_range_key(line_range[0], line_range[1])
+        row = self._result_rows.get(key)
+        if not row:
+            return
+        state = row["state"]
+        if state == "untriggered":
+            self.row_action_requested.emit(line_range, "start")
+        elif state == "working":
+            self.row_action_requested.emit(line_range, "stop")
+        elif state in ("finished", "interrupted"):
+            self.row_action_requested.emit(line_range, "retry")
+
+    def bind_result_popup(self, line_range: tuple, popup: QWidget):
+        key = self._line_range_key(line_range[0], line_range[1])
+        row = self._result_rows.get(key)
+        if not row:
+            return
+        row["popup_ref"] = popup
+
+        def _focus_popup():
+            ref = row.get("popup_ref")
+            if not ref:
+                return
+            ref.show()
+            ref.raise_()
+            ref.activateWindow()
+
+        try:
+            row["popup_button"].clicked.disconnect()
+        except Exception:
+            pass
+        row["popup_button"].clicked.connect(_focus_popup)
+
+    def set_result_status(self, line_range: tuple, status: str):
+        """status: 'untriggered' | 'running' | 'success' | 'error' | 'interrupted'."""
+        key = self._line_range_key(line_range[0], line_range[1])
+        row = self._result_rows.get(key)
+        if not row:
+            return
+        label = row["status_label"]
+        btn = row["action_button"]
+        if status == "running":
+            label.setText("⌛")
+            label.setToolTip("Running")
+            row["stream_label"].setText(self._activity_frames[0])
+            row["stream_frame_idx"] = 0
+            row["state"] = "working"
+            btn.setText("Stop")
+        elif status == "success":
+            label.setText("✓")
+            label.setToolTip("Success")
+            row["stream_label"].setText(" ")
+            row["state"] = "finished"
+            btn.setText("Retry")
+        elif status == "error":
+            label.setText("✗")
+            label.setToolTip("Error")
+            row["stream_label"].setText(" ")
+            row["state"] = "finished"
+            btn.setText("Retry")
+        elif status == "interrupted":
+            label.setText("⊘")
+            label.setToolTip("Interrupted")
+            row["stream_label"].setText(" ")
+            row["state"] = "interrupted"
+            btn.setText("Retry")
+        else:
+            label.setText("—")
+            label.setToolTip("Untriggered")
+            row["stream_label"].setText(" ")
+            row["state"] = "untriggered"
+            btn.setText("Start")
+
+    def mark_stream_activity(self, line_range: tuple):
+        key = self._line_range_key(line_range[0], line_range[1])
+        row = self._result_rows.get(key)
+        if not row:
+            return
+        if row["status_label"].text() != "⌛":
+            return
+        idx = (row["stream_frame_idx"] + 1) % len(self._activity_frames)
+        row["stream_frame_idx"] = idx
+        row["stream_label"].setText(self._activity_frames[idx])

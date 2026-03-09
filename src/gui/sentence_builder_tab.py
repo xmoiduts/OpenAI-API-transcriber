@@ -548,7 +548,11 @@ class TaskCardsSidebarPanel(QFrame):
         self.assemble_card = AssembleCard()
         self.assemble_card.start_clicked.connect(self._on_assemble_start)
         self.assemble_card.start_hovered.connect(self._on_start_hover)
+        self.assemble_card.row_action_requested.connect(self._on_assemble_row_action)
         card_layout.addWidget(self.assemble_card)
+
+        self._assemble_run_id: int = 0
+        self._assemble_popup_data: dict = {}  # key -> {popup, prompt, ...}
         
         card_layout.addStretch()
         
@@ -1255,50 +1259,186 @@ class TaskCardsSidebarPanel(QFrame):
         self.assemble_card.set_line_ranges(ranges)
         return True
     
+    # =====================================================================
+    # Assemble Sentence – orchestration
+    # =====================================================================
+
     def _on_assemble_start(self):
-        """Handle Assemble Sentence task start."""
+        """Handle Assemble Sentence 'Start' button – create summary rows and launch all subtasks."""
         if not self._check_model_selected() or not self._check_data_loaded():
             return
-        
+
         line_ranges = self.assemble_card.get_line_ranges()
-        
         if not line_ranges:
             show_flying_message(self, "No line ranges defined")
             return
-        
+
+        self._assemble_run_id += 1
+        current_run_id = self._assemble_run_id
+        self._assemble_popup_data = {}
+
+        self.assemble_card.reset_result_rows(line_ranges)
+
         words = parse_timestamp_file(str(self._word_timestamps_file))
-        
-        for start_line, end_line in line_ranges:
-            popup = self._create_popup("Assemble Sentence", (start_line, end_line))
-            popup.show()
-            
-            popup.log(f"Processing lines {start_line} to {end_line}")
-            
+        prompt_template = self.assemble_card.get_prompt()
+        user_input = self.assemble_card.get_user_input()
+        thinking_level = self.assemble_card.get_thinking_level()
+        max_ll = self.assemble_card.get_max_line_length()
+        max_op = self.assemble_card.get_max_over_limit_pct()
+
+        total = len(line_ranges)
+        for idx, (start_line, end_line) in enumerate(line_ranges):
+            lr = (start_line, end_line)
+            needs_approval = idx > 0
+            slice_info = f"{idx + 1}/{total} (lines {start_line}-{end_line})"
+
             context_lines = []
-            for start, end, word, line_num in words:
+            for s, e, word, line_num in words:
                 if start_line <= line_num <= end_line:
-                    context_lines.append(f"{start:.2f} {end:.2f} \"{word}\"")
-            
-            if not context_lines:
-                popup.log("No data in specified range")
-                continue
-            
+                    context_lines.append(f"{s:.2f} {e:.2f} \"{word}\"")
             context_text = "\n".join(context_lines)
-            popup.set_context(context_text)
-            
-            prompt_template = self.assemble_card.get_prompt()
-            user_input = self.assemble_card.get_user_input()
-            
+
             prompt = prompt_template.replace("{user_input}", user_input or "None")
             prompt = prompt.replace("{start_line}", str(start_line))
             prompt = prompt.replace("{end_line}", str(end_line))
             prompt = prompt.replace("{context}", context_text)
-            
-            popup.log(f"Sending prompt ({len(prompt)} chars) to LLM...")
+
+            self._assemble_popup_data[self.assemble_card._line_range_key(start_line, end_line)] = {
+                "line_range": lr,
+                "context_text": context_text,
+                "prompt": prompt,
+                "thinking_level": thinking_level,
+                "run_id": current_run_id,
+            }
+
+            popup = self._create_assemble_popup(
+                lr, needs_approval, slice_info, max_ll, max_op, current_run_id
+            )
+
+            if not context_lines:
+                popup.log("No data in specified range")
+                self.assemble_card.set_result_status(lr, "error")
+                continue
+
+            popup.set_context(context_text)
+            popup.log(f"Slice {idx + 1}/{total}")
+            popup.log(f"Context length: {len(context_text)} chars")
+            popup.log(f"Prompt length: {len(prompt)} chars")
+
+            if needs_approval:
+                popup.log("Waiting for manual approval to proceed...")
+                self.assemble_card.set_result_status(lr, "untriggered")
+            else:
+                popup.log("Auto-approved (first slice)")
+                self.assemble_card.set_result_status(lr, "running")
+
+            popup.execute_prompt(prompt, thinking_level=thinking_level, task_key="assemble-sentence")
+            popup.show()
+            QApplication.processEvents()
+
+    def _create_assemble_popup(
+        self, line_range, needs_approval, slice_info, max_ll, max_op, run_id
+    ):
+        """Create a popup window configured for the assemble task."""
+        popup = TaskPopupWindow(
+            "Assemble Sentence",
+            line_range,
+            needs_approval=needs_approval,
+            slice_info=slice_info,
+            enable_line_metrics=True,
+            max_line_length=max_ll,
+            max_over_limit_pct=max_op,
+        )
+        popup.set_chat_core(self._create_isolated_chat_core())
+        self._popup_windows.append(popup)
+        popup.destroyed.connect(
+            lambda: self._popup_windows.remove(popup) if popup in self._popup_windows else None
+        )
+
+        cascade_offset = 30
+        index = len(self._popup_windows) - 1
+        popup.move(100 + index * cascade_offset, 100 + index * cascade_offset)
+
+        self.assemble_card.bind_result_popup(line_range, popup)
+
+        popup.task_completed.connect(
+            lambda success, response, lr=line_range, rid=run_id:
+            self._on_assemble_task_completed(lr, success, response, rid)
+        )
+        popup.stream_activity.connect(
+            lambda _src, lr=line_range: self.assemble_card.mark_stream_activity(lr)
+        )
+        popup.auto_quenched.connect(
+            lambda lr=line_range: self._on_assemble_quenched(lr)
+        )
+        popup.gate_approved.connect(
+            lambda lr=line_range: self.assemble_card.set_result_status(lr, "running")
+        )
+
+        return popup
+
+    def _on_assemble_task_completed(self, line_range, success, response, run_id):
+        if run_id != self._assemble_run_id:
+            return
+        if success:
+            self.assemble_card.set_result_status(line_range, "success")
+        else:
+            self.assemble_card.set_result_status(line_range, "error")
+
+    def _on_assemble_quenched(self, line_range):
+        self.assemble_card.set_result_status(line_range, "interrupted")
+
+    # -- Per-row Start / Stop / Retry -----------------------------------
+
+    def _on_assemble_row_action(self, line_range: tuple, action: str):
+        """Handle per-row action button clicks from AssembleCard summary rows."""
+        key = self.assemble_card._line_range_key(line_range[0], line_range[1])
+        row = self.assemble_card._result_rows.get(key)
+        if not row:
+            return
+
+        if action == "stop":
+            popup = row.get("popup_ref")
+            if popup and hasattr(popup, "stop_button"):
+                popup.stop_button.click()
+            self.assemble_card.set_result_status(line_range, "interrupted")
+            return
+
+        if action in ("start", "retry"):
+            data = self._assemble_popup_data.get(key)
+            if not data:
+                show_flying_message(self, f"No cached data for {key}")
+                return
+
+            if not self._check_model_selected():
+                return
+
+            max_ll = self.assemble_card.get_max_line_length()
+            max_op = self.assemble_card.get_max_over_limit_pct()
+
+            old_popup = row.get("popup_ref")
+            if old_popup:
+                try:
+                    old_popup.close()
+                except Exception:
+                    pass
+
+            popup = self._create_assemble_popup(
+                line_range,
+                needs_approval=False,
+                slice_info=f"(lines {line_range[0]}-{line_range[1]})",
+                max_ll=max_ll,
+                max_op=max_op,
+                run_id=self._assemble_run_id,
+            )
+            popup.set_context(data["context_text"])
+            popup.log(f"{'Retrying' if action == 'retry' else 'Starting'} lines {line_range[0]}-{line_range[1]}")
+            popup.log(f"Prompt length: {len(data['prompt'])} chars")
+            self.assemble_card.set_result_status(line_range, "running")
             popup.execute_prompt(
-                prompt,
-                thinking_level=self.assemble_card.get_thinking_level(),
+                data["prompt"],
+                thinking_level=data["thinking_level"],
                 task_key="assemble-sentence",
             )
-            
+            popup.show()
             QApplication.processEvents()

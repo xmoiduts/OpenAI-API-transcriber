@@ -24,38 +24,8 @@ import argparse
 import math
 import re
 import sys
-import unicodedata
 
-
-def is_cjk(char: str) -> bool:
-    """Check if a character is CJK (Chinese, Japanese, Korean)."""
-    try:
-        name = unicodedata.name(char, '')
-        return any(x in name for x in ['CJK', 'HIRAGANA', 'KATAKANA', 'HANGUL', 'IDEOGRAPH'])
-    except ValueError:
-        return False
-
-
-def calc_length(text: str) -> float:
-    """
-    Calculate the weighted length of text.
-    
-    Rules:
-    - CJK characters: 1 unit each
-    - English letters: 0.5 units per letter (2 letters = 1 unit)
-    - Spaces and other characters: ignored
-    """
-    length = 0.0
-    for char in text:
-        if char.isspace():
-            continue
-        elif is_cjk(char):
-            length += 1
-        elif char.isalpha():  # English/Latin letters
-            length += 0.5
-        # Other punctuation, numbers, etc. - could count or ignore
-        # Based on the example, we'll count them as 0 (ignored)
-    return length
+from util.text_metrics import is_cjk, calc_length
 
 
 def parse_subtitle_line(line: str) -> tuple[float, float, str] | None:
