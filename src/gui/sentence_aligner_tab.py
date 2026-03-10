@@ -151,7 +151,6 @@ class SentenceAlignerTab(TabInterface):
         header.setSectionResizeMode(2, QHeaderView.Interactive)
         header.setStretchLastSection(True)
 
-        self.subtitle_table.cellClicked.connect(self._on_table_row_clicked)
         self.subtitle_table.currentCellChanged.connect(self._on_current_cell_changed)
 
     def _build_control_panel(self):
@@ -340,11 +339,8 @@ class SentenceAlignerTab(TabInterface):
             self._resize_columns()
 
     # --------------------------------------------------- Row selection ------
-    def _on_table_row_clicked(self, row, _col=None):
-        self._refresh_drawing_zone(row)
-
     def _on_current_cell_changed(self, current_row, _current_col, _prev_row, _prev_col):
-        """Triggered by keyboard up/down navigation."""
+        """Triggered by both keyboard navigation and mouse row changes."""
         self._refresh_drawing_zone(current_row)
 
     # ------------------------------------------------ Waveform loading ----
@@ -371,19 +367,21 @@ class SentenceAlignerTab(TabInterface):
         thread = _WaveformThread(self.current_file_path, view_start, view_duration, num_bins)
         thread.result_ready.connect(lambda amps, r=row: self._on_waveform_ready(amps, r))
         thread.error.connect(self._on_waveform_error)
-        thread.finished.connect(self._on_worker_finished)
+        thread.finished.connect(lambda t=thread: self._on_worker_finished(t))
         thread.finished.connect(thread.deleteLater)
 
         self._worker_thread = thread
         thread.start()
 
-    def _on_worker_finished(self):
-        self._worker_thread = None
+    def _on_worker_finished(self, finished_thread: QThread):
+        if self._worker_thread is finished_thread:
+            self._worker_thread = None
 
     def _cancel_worker(self):
         if self._worker_thread is not None:
-            self._worker_thread.quit()
-            self._worker_thread.wait(500)
+            thread = self._worker_thread
+            thread.quit()
+            thread.wait(500)
             self._worker_thread = None
 
     def _on_waveform_ready(self, amplitudes: np.ndarray, row: int):
