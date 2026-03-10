@@ -5,6 +5,7 @@ from .transcription_new_tab import TranscriptionNewTab
 from .ASR_postprocess_tab import ASRPostprocessTab
 from .sentence_builder_tab import SentenceBuilderTab
 from .line_translation_tab import LineTranslationTab
+from .sentence_aligner_tab import SentenceAlignerTab
 from .styles.style_manager import get_main_window_stylesheet
 
 
@@ -23,6 +24,7 @@ class MainWindow(QMainWindow):
         self.asr_postprocess_tab = ASRPostprocessTab()
         self.sentence_builder_tab = SentenceBuilderTab()
         self.line_translation_tab = LineTranslationTab()
+        self.sentence_aligner_tab = SentenceAlignerTab()
 
         self.tab_widget.addTab(self.time_slicer_tab, "Time Slicer")
         self.tab_widget.addTab(self.transcription_tab, "Tr-old")
@@ -30,6 +32,7 @@ class MainWindow(QMainWindow):
         self.tab_widget.addTab(self.asr_postprocess_tab, "ASR post process")
         self.tab_widget.addTab(self.sentence_builder_tab, "Sentence Builder")
         self.tab_widget.addTab(self.line_translation_tab, "Line Translation")
+        self.tab_widget.addTab(self.sentence_aligner_tab, "Sentence Aligner")
 
         self.setStyleSheet(get_main_window_stylesheet())
 
@@ -46,4 +49,5 @@ class MainWindow(QMainWindow):
         self.transcription_new_tab.update_from_other_tab(data)
         self.asr_postprocess_tab.update_from_other_tab(data)
         self.sentence_builder_tab.update_from_other_tab(data)
+        self.sentence_aligner_tab.update_from_other_tab(data)
 
