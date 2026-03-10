@@ -317,8 +317,25 @@ class ASRPostprocessTab(TabInterface):
              return
         
         try:
-            generate_subtitles(orig_path, trans_path, output_path)
-            show_flying_message(self, f"Successfully generated: {output_path}")
+            result = generate_subtitles(orig_path, trans_path, output_path)
+            if result is None:
+                show_flying_message(self, "Error: input files missing.")
+                return
+
+            parts = [f"Generated {result['num_entries']} subtitle entries."]
+
+            if result['monotonicity_warnings']:
+                n = len(result['monotonicity_warnings'])
+                parts.append(f"WARNING: {n} translation timestamp monotonicity violation(s).")
+
+            if result['orphan_merges']:
+                n = len(result['orphan_merges'])
+                parts.append(f"{n} orphan translation(s) merged into adjacent subtitle.")
+
+            if result['unmatched_originals']:
+                parts.append(f"{result['unmatched_originals']} original line(s) have no translation.")
+
+            show_flying_message(self, "  ".join(parts))
         except Exception as e:
             show_flying_message(self, f"Error: {e}")
             import traceback
