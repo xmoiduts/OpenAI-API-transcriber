@@ -1,0 +1,522 @@
+from dataclasses import dataclass
+
+from PyQt5.QtCore import Qt, QRectF, QEvent
+from PyQt5.QtGui import QColor, QFont, QPainter, QPen
+from PyQt5.QtWidgets import (
+    QFrame,
+    QHBoxLayout,
+    QLabel,
+    QGestureEvent,
+    QPinchGesture,
+    QScrollBar,
+    QSizePolicy,
+    QVBoxLayout,
+    QWidget,
+)
+
+from .tile_store import AudioStrengthTileStore
+from .timeline_controller import TimelineController
+
+
+RULER_HEIGHT = 36
+AUDIO_TRACK_HEIGHT = 108
+VAD_TRACK_HEIGHT = 38
+METHOD_TRACK_HEIGHT = AUDIO_TRACK_HEIGHT + VAD_TRACK_HEIGHT
+CONTROL_PANEL_WIDTH = 220
+
+
+@dataclass(frozen=True)
+class VadInterval:
+    start_sec: float
+    end_sec: float
+    label: str
+
+
+@dataclass(frozen=True)
+class VadMethodSpec:
+    method_key: str
+    title: str
+    accent_color: str
+    description: str
+
+
+class PannableTrackWidget(QWidget):
+    """Base class for widgets that pan the shared timeline by dragging."""
+
+    def __init__(self, controller: TimelineController, parent=None):
+        super().__init__(parent)
+        self.controller = controller
+        self._drag_last_global_x = None
+        self.setMouseTracking(True)
+        self.setAttribute(Qt.WA_AcceptTouchEvents, True)
+        self.grabGesture(Qt.PinchGesture)
+        self.controller.viewport_changed.connect(self.update)
+
+    def event(self, event):
+        if event.type() == QEvent.Gesture:
+            return self._handle_gesture_event(event)
+        return super().event(event)
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.LeftButton:
+            self._drag_last_global_x = event.globalX()
+            self.setCursor(Qt.ClosedHandCursor)
+            event.accept()
+            return
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event):
+        if self._drag_last_global_x is not None:
+            delta_x = event.globalX() - self._drag_last_global_x
+            self._drag_last_global_x = event.globalX()
+            self.controller.scroll_by_pixels(-delta_x)
+            event.accept()
+            return
+        super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event):
+        if event.button() == Qt.LeftButton and self._drag_last_global_x is not None:
+            self._drag_last_global_x = None
+            self.unsetCursor()
+            event.accept()
+            return
+        super().mouseReleaseEvent(event)
+
+    def leaveEvent(self, event):
+        if self._drag_last_global_x is None:
+            self.unsetCursor()
+        super().leaveEvent(event)
+
+    def wheelEvent(self, event):
+        modifiers = event.modifiers()
+        pixel_delta = event.pixelDelta()
+        angle_delta = event.angleDelta()
+
+        # Touchpad scrolling usually reports pixelDelta; we ignore vertical swipes
+        # and pan horizontally on left/right swipes.
+        if not pixel_delta.isNull():
+            if modifiers & Qt.AltModifier:
+                event.accept()
+                return
+
+            if pixel_delta.x() != 0:
+                self.controller.scroll_by_pixels(-pixel_delta.x() * 0.5)
+            event.accept()
+            return
+
+        if modifiers & Qt.AltModifier:
+            delta = angle_delta.y() or angle_delta.x()
+            if delta != 0:
+                factor = 1.20 if delta > 0 else 1 / 1.20
+                self.controller.zoom_by_factor(factor, event.pos().x())
+            event.accept()
+            return
+
+        delta = angle_delta.y() or angle_delta.x()
+        if delta != 0:
+            # Wheel down => look further into the future (scroll right).
+            self.controller.scroll_by_pixels(int((-delta / 120.0) * 180))
+            event.accept()
+            return
+
+        super().wheelEvent(event)
+
+    def _handle_gesture_event(self, event):
+        if not isinstance(event, QGestureEvent):
+            return False
+
+        pinch = event.gesture(Qt.PinchGesture)
+        if pinch is None:
+            return False
+
+        if isinstance(pinch, QPinchGesture):
+            last_factor = pinch.lastScaleFactor() or 1.0
+            scale_factor = pinch.scaleFactor() or 1.0
+            delta_factor = scale_factor / last_factor if last_factor else scale_factor
+            center_x = max(0.0, min(float(pinch.centerPoint().x()), float(self.width())))
+            self.controller.zoom_by_factor(delta_factor, center_x)
+            event.accept()
+            return True
+
+        return False
+
+
+class TimelineRulerWidget(PannableTrackWidget):
+    """Shared top ruler rendered from the current viewport only."""
+
+    def __init__(self, controller: TimelineController, parent=None):
+        super().__init__(controller, parent)
+        self.setFixedHeight(RULER_HEIGHT)
+        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self.controller.set_viewport_width(self.width())
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing)
+        painter.fillRect(self.rect(), QColor("#FFFFFF"))
+
+        start_sec, end_sec = self.controller.visible_time_range()
+        tick_interval = _choose_tick_interval(max(end_sec - start_sec, 0.1))
+        first_tick = int(start_sec / tick_interval) * tick_interval
+        if first_tick > start_sec:
+            first_tick -= tick_interval
+
+        painter.setFont(QFont("Consolas", 9))
+        painter.setPen(QPen(QColor("#9A9A9A"), 1))
+
+        tick = first_tick
+        while tick <= end_sec + tick_interval:
+            x = self.controller.time_to_view_x(tick)
+            if -40 <= x <= self.width() + 40:
+                painter.drawLine(int(x), 14, int(x), RULER_HEIGHT)
+                painter.setPen(QColor("#666666"))
+                painter.drawText(int(x) + 4, 12, _format_time_label(tick))
+                painter.setPen(QPen(QColor("#9A9A9A"), 1))
+            tick += tick_interval
+
+        painter.setPen(QPen(QColor("#DADADA"), 1))
+        painter.drawLine(0, RULER_HEIGHT - 1, self.width(), RULER_HEIGHT - 1)
+        painter.end()
+
+
+class MethodTimelineTrackWidget(PannableTrackWidget):
+    """Shared-viewport track: tiled audio strength plus overlay VAD blocks."""
+
+    def __init__(
+        self,
+        controller: TimelineController,
+        tile_store: AudioStrengthTileStore,
+        method_spec: VadMethodSpec,
+        vad_intervals: list[VadInterval],
+        parent=None,
+    ):
+        super().__init__(controller, parent)
+        self.tile_store = tile_store
+        self.method_spec = method_spec
+        self.vad_intervals = vad_intervals
+        self.setFixedHeight(METHOD_TRACK_HEIGHT)
+        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+
+    def set_vad_intervals(self, vad_intervals: list[VadInterval]):
+        self.vad_intervals = vad_intervals
+        self.update()
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing)
+        painter.fillRect(self.rect(), QColor("#FFFFFF"))
+
+        audio_rect = QRectF(0, 0, self.width(), AUDIO_TRACK_HEIGHT)
+        vad_rect = QRectF(0, AUDIO_TRACK_HEIGHT, self.width(), VAD_TRACK_HEIGHT)
+
+        self._draw_audio_tiles(painter, audio_rect)
+        self._draw_vad_overlay(painter, vad_rect)
+
+        painter.setPen(QPen(QColor("#DADADA"), 1))
+        painter.drawLine(0, AUDIO_TRACK_HEIGHT - 1, self.width(), AUDIO_TRACK_HEIGHT - 1)
+        painter.drawLine(0, METHOD_TRACK_HEIGHT - 1, self.width(), METHOD_TRACK_HEIGHT - 1)
+        painter.end()
+
+    def _draw_audio_tiles(self, painter: QPainter, audio_rect: QRectF):
+        painter.save()
+        painter.setClipRect(audio_rect)
+        painter.fillRect(audio_rect, QColor("#F5F8FC"))
+
+        if not self.tile_store.has_strength_series():
+            painter.setPen(QColor("#7D8899"))
+            painter.setFont(QFont("Segoe UI", 10))
+            painter.drawText(
+                audio_rect,
+                Qt.AlignCenter,
+                self.tile_store.get_status_message() or "Audio strength unavailable",
+            )
+            painter.restore()
+            return
+
+        tile_width = self.tile_store.tile_width_px
+        offset_px = self.controller.offset_px
+        viewport_width_px = self.controller.viewport_width_px
+
+        start_tile = max(offset_px // tile_width, 0)
+        end_tile = max((offset_px + viewport_width_px) // tile_width, start_tile)
+
+        self.tile_store.warm_visible_window(
+            method_key=self.method_spec.method_key,
+            accent_color=self.method_spec.accent_color,
+            offset_px=offset_px,
+            viewport_width_px=viewport_width_px,
+            height=int(audio_rect.height()),
+            samples_per_second=self.controller.samples_per_second,
+            pixels_per_sample=self.controller.pixels_per_sample,
+        )
+
+        for tile_index in range(start_tile, end_tile + 1):
+            pixmap = self.tile_store.get_tile(
+                method_key=self.method_spec.method_key,
+                accent_color=self.method_spec.accent_color,
+                tile_index=tile_index,
+                height=int(audio_rect.height()),
+                samples_per_second=self.controller.samples_per_second,
+                pixels_per_sample=self.controller.pixels_per_sample,
+            )
+            draw_x = tile_index * tile_width - offset_px
+            painter.drawPixmap(int(draw_x), int(audio_rect.top()), pixmap)
+
+        painter.setPen(QColor("#44546A"))
+        painter.setFont(QFont("Segoe UI", 10))
+        painter.drawText(
+            QRectF(12, 8, min(self.width() - 24, 320), 20),
+            Qt.AlignLeft | Qt.AlignVCenter,
+            f"{self.method_spec.title} strength",
+        )
+        painter.setPen(QColor("#96A2B5"))
+        painter.setFont(QFont("Segoe UI", 8))
+        painter.drawText(
+            QRectF(12, 28, min(self.width() - 24, 460), 16),
+            Qt.AlignLeft | Qt.AlignVCenter,
+            f"Actual audio strength tiles (50 samples/sec, zoom {self.controller.pixels_per_sample:.2f} px/sample)",
+        )
+        painter.restore()
+
+    def _draw_vad_overlay(self, painter: QPainter, vad_rect: QRectF):
+        painter.save()
+        painter.setClipRect(vad_rect)
+        painter.fillRect(vad_rect, QColor("#FAFAFA"))
+
+        start_sec, end_sec = self.controller.visible_time_range()
+        accent = QColor(self.method_spec.accent_color)
+
+        border_pen = QPen(QColor("#C5CBD5"), 1, Qt.DashLine)
+        painter.setPen(border_pen)
+        painter.setBrush(Qt.NoBrush)
+        painter.drawRoundedRect(vad_rect.adjusted(8, 6, -8, -6), 4, 4)
+
+        for interval in self.vad_intervals:
+            if interval.end_sec < start_sec or interval.start_sec > end_sec:
+                continue
+
+            x1 = self.controller.time_to_view_x(interval.start_sec)
+            x2 = self.controller.time_to_view_x(interval.end_sec)
+            rect_left = max(x1, 8)
+            rect_right = min(x2, self.width() - 8)
+            rect_width = max(rect_right - rect_left, 6)
+            rect = QRectF(rect_left, vad_rect.top() + 8, rect_width, vad_rect.height() - 16)
+
+            fill = QColor(accent)
+            fill.setAlpha(70)
+            painter.setPen(QPen(accent.darker(110), 1))
+            painter.setBrush(fill)
+            painter.drawRoundedRect(rect, 4, 4)
+
+            if rect.width() > 48:
+                painter.setPen(QColor("#334155"))
+                painter.setFont(QFont("Segoe UI", 8))
+                painter.drawText(rect.adjusted(6, 0, -4, 0), Qt.AlignVCenter | Qt.AlignLeft, interval.label)
+
+        painter.setPen(QColor("#7D8899"))
+        painter.setFont(QFont("Segoe UI", 9))
+        painter.drawText(
+            QRectF(12, vad_rect.top(), min(self.width() - 24, 260), vad_rect.height()),
+            Qt.AlignLeft | Qt.AlignVCenter,
+            "VAD overlay track",
+        )
+        painter.restore()
+
+
+class MethodControlPanel(QFrame):
+    """Left-side placeholder control block for one VAD method."""
+
+    def __init__(self, method_spec: VadMethodSpec, parent=None):
+        super().__init__(parent)
+        self.setObjectName("vadControlPanel")
+        self.setFixedWidth(CONTROL_PANEL_WIDTH)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(10, 10, 10, 10)
+        layout.setSpacing(8)
+
+        title_label = QLabel(method_spec.title)
+        title_label.setObjectName("vadMethodTitle")
+        layout.addWidget(title_label)
+
+        description = QLabel(method_spec.description)
+        description.setWordWrap(True)
+        layout.addWidget(description)
+
+        for line in ("control block", "placeholder", "future: thresholds / zoom"):
+            label = QLabel(line)
+            label.setWordWrap(True)
+            layout.addWidget(label)
+
+        layout.addStretch()
+
+
+class VadMethodRow(QFrame):
+    """Composite row with fixed control block and shared-viewport track."""
+
+    def __init__(
+        self,
+        controller: TimelineController,
+        tile_store: AudioStrengthTileStore,
+        method_spec: VadMethodSpec,
+        vad_intervals: list[VadInterval],
+        parent=None,
+    ):
+        super().__init__(parent)
+        self.method_spec = method_spec
+        self.setObjectName("vadMethodPanel")
+
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(10, 10, 10, 10)
+        layout.setSpacing(10)
+
+        self.control_panel = MethodControlPanel(method_spec)
+        self.track_widget = MethodTimelineTrackWidget(
+            controller=controller,
+            tile_store=tile_store,
+            method_spec=method_spec,
+            vad_intervals=vad_intervals,
+        )
+
+        layout.addWidget(self.control_panel)
+        layout.addWidget(self.track_widget, stretch=1)
+
+
+class VadTimelinePanel(QWidget):
+    """Shared ruler, method rows, and one bottom scrollbar."""
+
+    def __init__(self, method_specs: list[VadMethodSpec], parent=None):
+        super().__init__(parent)
+        self.method_specs = method_specs
+        self.controller = TimelineController(parent=self)
+        self.tile_store = AudioStrengthTileStore()
+        self.method_rows = []
+        self._init_ui()
+
+    def _init_ui(self):
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(6)
+
+        ruler_row = QHBoxLayout()
+        ruler_row.setContentsMargins(10, 0, 10, 0)
+        ruler_row.setSpacing(10)
+        ruler_row.addSpacing(CONTROL_PANEL_WIDTH)
+        self.ruler_widget = TimelineRulerWidget(self.controller)
+        ruler_row.addWidget(self.ruler_widget, stretch=1)
+        layout.addLayout(ruler_row)
+
+        for method_spec in self.method_specs:
+            row = VadMethodRow(
+                controller=self.controller,
+                tile_store=self.tile_store,
+                method_spec=method_spec,
+                vad_intervals=[],
+            )
+            self.method_rows.append(row)
+            layout.addWidget(row)
+
+        scrollbar_row = QHBoxLayout()
+        scrollbar_row.setContentsMargins(10, 0, 10, 0)
+        scrollbar_row.setSpacing(10)
+        scrollbar_row.addSpacing(CONTROL_PANEL_WIDTH)
+        self.scrollbar = QScrollBar(Qt.Horizontal)
+        scrollbar_row.addWidget(self.scrollbar, stretch=1)
+        layout.addLayout(scrollbar_row)
+
+        self.scrollbar.valueChanged.connect(self.controller.set_offset_px)
+        self.controller.scrollbar_state_changed.connect(self._sync_scrollbar_state)
+
+        self._sync_scrollbar_state(
+            self.controller.offset_px,
+            self.controller.max_offset_px,
+            self.controller.viewport_width_px,
+        )
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self.controller.set_viewport_width(self.ruler_widget.width())
+
+    def reset_for_media(self, duration_sec: float):
+        self.tile_store.clear()
+        self.controller.set_duration(duration_sec)
+        self.controller.reset_view()
+
+        for row, method_spec in zip(self.method_rows, self.method_specs):
+            row.track_widget.set_vad_intervals(
+                _build_placeholder_intervals(method_spec.method_key, duration_sec)
+            )
+        self._update_all_tracks()
+
+    def set_audio_status_message(self, status_message: str):
+        self.tile_store.set_status_message(status_message)
+        self._update_all_tracks()
+
+    def set_audio_strength_data(self, strength_series):
+        self.tile_store.set_strength_series(strength_series)
+        self._update_all_tracks()
+
+    def clear_timeline(self):
+        self.tile_store.clear()
+        self.controller.set_duration(7200.0)
+        self.controller.reset_view()
+        for row in self.method_rows:
+            row.track_widget.set_vad_intervals([])
+        self.tile_store.set_status_message("Waiting for media broadcast")
+        self._update_all_tracks()
+
+    def _sync_scrollbar_state(self, value: int, maximum: int, page_step: int):
+        self.scrollbar.blockSignals(True)
+        self.scrollbar.setRange(0, maximum)
+        self.scrollbar.setPageStep(max(page_step, 1))
+        self.scrollbar.setSingleStep(50)
+        self.scrollbar.setValue(value)
+        self.scrollbar.blockSignals(False)
+
+    def _update_all_tracks(self):
+        self.ruler_widget.update()
+        for row in self.method_rows:
+            row.track_widget.update()
+
+
+def _choose_tick_interval(visible_duration_sec: float) -> float:
+    candidates = [0.5, 1.0, 2.0, 5.0, 10.0, 15.0, 30.0, 60.0, 120.0, 300.0]
+    for candidate in candidates:
+        if visible_duration_sec / candidate <= 12:
+            return candidate
+    return 600.0
+
+
+def _format_time_label(seconds: float) -> str:
+    total_ms = max(int(seconds * 1000), 0)
+    total_seconds = total_ms // 1000
+    hours = total_seconds // 3600
+    minutes = (total_seconds % 3600) // 60
+    secs = total_seconds % 60
+    if hours > 0:
+        return f"{hours:02d}:{minutes:02d}:{secs:02d}"
+    return f"{minutes:02d}:{secs:02d}"
+
+
+def _build_placeholder_intervals(method_key: str, duration_sec: float) -> list[VadInterval]:
+    duration_sec = max(duration_sec, 1.0)
+    method_seed = max(sum(ord(ch) for ch in method_key) % 9, 1)
+    intervals = []
+    cursor = method_seed * 0.7
+
+    while cursor < duration_sec:
+        speech_length = 1.2 + ((method_seed * 11 + int(cursor * 10)) % 40) / 10.0
+        gap_length = 0.6 + ((method_seed * 7 + int(cursor * 8)) % 18) / 10.0
+        end_sec = min(cursor + speech_length, duration_sec)
+        intervals.append(
+            VadInterval(
+                start_sec=cursor,
+                end_sec=end_sec,
+                label=f"{method_key}-speech",
+            )
+        )
+        cursor = end_sec + gap_length
+
+    return intervals
