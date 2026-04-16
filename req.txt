@@ -1,7 +1,10 @@
 pyqt5
 ffmpeg-python # install ffmpeg beforehand
+numpy
 requests
 pyyaml
+silero-vad
+torch
 
 # ChatCore dependencies (multi-vendor LLM support)
 openai>=1.0.0  # OpenAI-compatible API (also used for proxy services like aihubmix)
