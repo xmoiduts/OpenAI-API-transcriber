@@ -157,9 +157,10 @@ class SegmentBar(QFrame):
 
     def seconds_to_hms(self, seconds):
         """Convert seconds to HMS format"""
-        h = seconds // 3600
-        m = (seconds % 3600) // 60
-        s = seconds % 60
+        total = int(seconds)
+        h = total // 3600
+        m = (total % 3600) // 60
+        s = total % 60
         return h, m, s
 
     def hms_to_seconds(self, h, m, s):

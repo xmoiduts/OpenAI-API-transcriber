@@ -5,14 +5,21 @@ from .tab_interface import TabInterface
 from .styles.style_manager import get_drop_zone_stylesheet, get_scrollbar_stylesheet
 from .util.add_zero_wide_char_to_str import add_zero_wide_char_to_str
 from .vad_exp.audio_parse_thread import AudioParseThread
-from .vad_exp.timeline_widgets import VadMethodSpec, VadTimelinePanel
+from .vad_exp.timeline_widgets import VadInterval, VadMethodSpec, VadTimelinePanel
+from src.vad.adapters import SileroVadEngine
+from src.vad.service import VadApplicationService
 
 
 APPROVAL_THRESHOLD_SEC = 10 * 60
+SILERO_ENGINE_KEY = "silero"
 
 
 class VADExpTab(TabInterface):
-    """Experimental tab for comparing multiple future VAD implementations."""
+    """Experimental tab for comparing multiple future VAD implementations.
+
+    For the current Silero-first wiring and extension notes, see
+    `doc/vad-engine-silero-integration.md`.
+    """
 
     def __init__(self):
         super().__init__("VAD Exp")
@@ -21,12 +28,13 @@ class VADExpTab(TabInterface):
         self.pending_approval = False
         self.parse_generation = 0
         self.parse_thread = None
+        self.vad_service = VadApplicationService([SileroVadEngine()])
         self.method_specs = [
             VadMethodSpec(
-                method_key="vad_method_1",
-                title="VAD Method 1",
+                method_key=SILERO_ENGINE_KEY,
+                title="Silero VAD",
                 accent_color="#4A90D9",
-                description="Real audio-strength tiles with placeholder VAD intervals.",
+                description="Real speech regions from the first VAD engine slot.",
             ),
             VadMethodSpec(
                 method_key="vad_method_2",
@@ -62,7 +70,7 @@ class VADExpTab(TabInterface):
         note_layout.setSpacing(4)
         note_layout.addWidget(QLabel("Experimental multi-VAD comparison area"))
         note_layout.addWidget(
-            QLabel("Current round: fixed finest scale, tiled synthetic strength, overlay VAD, no parsing / zoom yet")
+            QLabel("Current round: actual audio-strength tiles plus Silero VAD on the first lane")
         )
         root_layout.addWidget(note_frame)
 
@@ -83,6 +91,10 @@ class VADExpTab(TabInterface):
         self.timeline_panel = VadTimelinePanel(self.method_specs)
         root_layout.addWidget(self.timeline_panel, stretch=1)
         root_layout.addStretch()
+
+        for row in self.timeline_panel.method_rows:
+            row.send_slices.connect(self._on_row_send_slices)
+
         self.setStyleSheet(
             get_drop_zone_stylesheet() +
             get_scrollbar_stylesheet() +
@@ -112,14 +124,16 @@ class VADExpTab(TabInterface):
         if self.current_duration > APPROVAL_THRESHOLD_SEC:
             self.pending_approval = True
             self.parse_status_label.setText(
-                "Long media detected (>10 min). Click Approve to start ffmpeg audio parsing."
+                "Long media detected (>10 min). Click Approve to start amplitude + Silero VAD analysis."
             )
             self.approve_button.setEnabled(True)
             self.approve_button.show()
-            self.timeline_panel.set_audio_status_message("Awaiting approval for audio parse")
+            self.timeline_panel.set_audio_status_message("Awaiting approval for amplitude + Silero VAD")
+            self._show_cached_vad_result()
         else:
             self.pending_approval = False
             self.approve_button.hide()
+            self._show_cached_vad_result()
             self._start_audio_parse(auto_started=True)
 
     def _on_approve_clicked(self):
@@ -133,14 +147,34 @@ class VADExpTab(TabInterface):
         if not self.current_file_path:
             return
 
+        self.request_analysis_range(
+            start_sec=0.0,
+            end_sec=self.current_duration or 7200.0,
+            include_amplitude=True,
+            include_vad=True,
+            auto_started=auto_started,
+        )
+
+    def request_analysis_range(
+        self,
+        start_sec: float,
+        end_sec: float,
+        include_amplitude: bool,
+        include_vad: bool,
+        auto_started: bool = False,
+    ):
+        if not self.current_file_path:
+            return
+
         self.parse_generation += 1
         generation = self.parse_generation
 
-        self.timeline_panel.set_audio_status_message("Parsing audio strength with ffmpeg...")
+        request_label = self._describe_request(include_amplitude, include_vad)
+        self.timeline_panel.set_audio_status_message(f"Running {request_label} analysis...")
         if auto_started:
-            self.parse_status_label.setText("Short media detected. Parsing audio automatically...")
+            self.parse_status_label.setText(f"Short media detected. Running {request_label} automatically...")
         else:
-            self.parse_status_label.setText("Approval received. Parsing audio strength...")
+            self.parse_status_label.setText(f"Approval received. Running {request_label}...")
 
         self.approve_button.hide()
 
@@ -148,6 +182,12 @@ class VADExpTab(TabInterface):
             generation=generation,
             media_path=self.current_file_path,
             duration_sec=self.current_duration or 7200.0,
+            service=self.vad_service,
+            start_sec=start_sec,
+            end_sec=end_sec,
+            include_amplitude=include_amplitude,
+            include_vad=include_vad,
+            engine_key=SILERO_ENGINE_KEY,
             parent=self,
         )
         self.parse_thread.success.connect(self._on_parse_success)
@@ -156,13 +196,29 @@ class VADExpTab(TabInterface):
         self.parse_thread.finished.connect(self.parse_thread.deleteLater)
         self.parse_thread.start()
 
-    def _on_parse_success(self, generation: int, strength_series):
+    def _on_parse_success(self, generation: int, analysis_output):
         if generation != self.parse_generation:
             return
 
-        self.timeline_panel.set_audio_strength_data(strength_series)
+        if analysis_output.amplitude_series is not None:
+            self.timeline_panel.set_audio_strength_data(analysis_output.amplitude_series)
+
+        if analysis_output.vad_result is not None:
+            self.timeline_panel.set_method_vad_intervals(
+                SILERO_ENGINE_KEY,
+                self._build_vad_intervals(analysis_output.vad_result.speech_segments),
+            )
+
+        strength_count = 0
+        if analysis_output.amplitude_series is not None:
+            strength_count = len(analysis_output.amplitude_series)
+
+        segment_count = 0
+        if analysis_output.vad_result is not None:
+            segment_count = len(analysis_output.vad_result.speech_segments)
+
         self.parse_status_label.setText(
-            f"Audio parsed successfully: {len(strength_series)} strength samples at 50/sec"
+            f"{analysis_output.status_message}: {strength_count} strength samples, {segment_count} speech segments"
         )
         self.parse_thread = None
 
@@ -170,8 +226,8 @@ class VADExpTab(TabInterface):
         if generation != self.parse_generation:
             return
 
-        self.timeline_panel.set_audio_status_message("Audio parse failed")
-        self.parse_status_label.setText(f"Audio parse failed: {error_message}")
+        self.timeline_panel.set_audio_status_message("Analysis failed")
+        self.parse_status_label.setText(f"Amplitude/VAD analysis failed: {error_message}")
         if self.current_duration > APPROVAL_THRESHOLD_SEC:
             self.pending_approval = True
             self.approve_button.setEnabled(True)
@@ -182,8 +238,8 @@ class VADExpTab(TabInterface):
         if generation != self.parse_generation:
             return
 
-        self.timeline_panel.set_audio_status_message("Audio parse cancelled")
-        self.parse_status_label.setText("Audio parse cancelled")
+        self.timeline_panel.set_audio_status_message("Analysis cancelled")
+        self.parse_status_label.setText("Amplitude/VAD analysis cancelled")
         if self.pending_approval and self.current_file_path:
             self.approve_button.setEnabled(True)
             self.approve_button.show()
@@ -195,6 +251,47 @@ class VADExpTab(TabInterface):
             self.parse_thread.stop()
             self.parse_thread.wait(1000)
         self.parse_thread = None
+
+    def _show_cached_vad_result(self):
+        cached = self.vad_service.get_cached_result(self.current_file_path, SILERO_ENGINE_KEY)
+        if cached is None:
+            return
+        self.timeline_panel.set_method_vad_intervals(
+            SILERO_ENGINE_KEY,
+            self._build_vad_intervals(cached.speech_segments),
+        )
+
+    @staticmethod
+    def _build_vad_intervals(speech_segments):
+        return [
+            VadInterval(start_sec=segment.start_sec, end_sec=segment.end_sec, label="speech")
+            for segment in speech_segments
+        ]
+
+    def _on_row_send_slices(self, slices: list):
+        main_window = self._get_main_window()
+        if main_window and hasattr(main_window, "push_slices_to_transcription"):
+            main_window.push_slices_to_transcription(
+                self.current_file_path,
+                self.current_duration,
+                slices,
+            )
+
+    def _get_main_window(self):
+        parent = self.parent()
+        while parent is not None:
+            if hasattr(parent, "push_slices_to_transcription"):
+                return parent
+            parent = parent.parent()
+        return None
+
+    @staticmethod
+    def _describe_request(include_amplitude: bool, include_vad: bool) -> str:
+        if include_amplitude and include_vad:
+            return "amplitude + Silero VAD"
+        if include_amplitude:
+            return "amplitude-only"
+        return "Silero VAD-only"
 
     @staticmethod
     def _local_stylesheet():

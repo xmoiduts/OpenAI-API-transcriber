@@ -55,3 +55,7 @@ class MainWindow(QMainWindow):
         self.sentence_builder_tab.update_from_other_tab(data)
         self.sentence_aligner_tab.update_from_other_tab(data)
 
+    def push_slices_to_transcription(self, file_path, duration, slices):
+        """Replace only the slice data on the Transcription New tab."""
+        self.transcription_new_tab.replace_slices(file_path, duration, slices)
+

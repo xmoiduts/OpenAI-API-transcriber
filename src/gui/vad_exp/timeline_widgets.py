@@ -1,6 +1,8 @@
+import bisect
+import math
 from dataclasses import dataclass
 
-from PyQt5.QtCore import Qt, QRectF, QEvent
+from PyQt5.QtCore import Qt, QRectF, QEvent, pyqtSignal
 from PyQt5.QtGui import QColor, QFont, QPainter, QPen
 from PyQt5.QtWidgets import (
     QFrame,
@@ -8,6 +10,7 @@ from PyQt5.QtWidgets import (
     QLabel,
     QGestureEvent,
     QPinchGesture,
+    QPushButton,
     QScrollBar,
     QSizePolicy,
     QVBoxLayout,
@@ -200,9 +203,76 @@ class MethodTimelineTrackWidget(PannableTrackWidget):
         self.setFixedHeight(METHOD_TRACK_HEIGHT)
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
 
+        self.blade_mode_active = False
+        self.confirmed_cuts: list[int] = []
+        self._hover_time_sec: float | None = None
+        self._snapped_sec: int | None = None
+        self._mouse_inside = False
+
     def set_vad_intervals(self, vad_intervals: list[VadInterval]):
         self.vad_intervals = vad_intervals
         self.update()
+
+    def set_blade_mode(self, active: bool):
+        self.blade_mode_active = active
+        if not active:
+            self._hover_time_sec = None
+            self._snapped_sec = None
+        self.update()
+
+    def get_slices(self, duration: float) -> list[tuple[int, int]]:
+        """Convert confirmed cut points into (start, duration) pairs."""
+        cuts = sorted(self.confirmed_cuts)
+        end = math.ceil(duration)
+        boundaries = [0] + cuts + [end]
+        slices = []
+        for i in range(len(boundaries) - 1):
+            s = boundaries[i]
+            d = boundaries[i + 1] - s
+            if d > 0:
+                slices.append((s, d))
+        return slices
+
+    # -- Mouse overrides for blade mode ---------------------------------
+
+    def enterEvent(self, event):
+        self._mouse_inside = True
+        super().enterEvent(event)
+
+    def leaveEvent(self, event):
+        self._mouse_inside = False
+        if self.blade_mode_active:
+            self._hover_time_sec = None
+            self._snapped_sec = None
+            self.update()
+        super().leaveEvent(event)
+
+    def mousePressEvent(self, event):
+        if self.blade_mode_active and event.button() == Qt.LeftButton:
+            time_sec = self.controller.view_x_to_time(event.pos().x())
+            snapped = max(0, round(time_sec))
+            if event.modifiers() & Qt.ShiftModifier:
+                if snapped in self.confirmed_cuts:
+                    self.confirmed_cuts.remove(snapped)
+            else:
+                if snapped not in self.confirmed_cuts:
+                    bisect.insort(self.confirmed_cuts, snapped)
+            self.update()
+            event.accept()
+            return
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event):
+        if self.blade_mode_active and self._drag_last_global_x is None:
+            time_sec = self.controller.view_x_to_time(event.pos().x())
+            self._hover_time_sec = time_sec
+            self._snapped_sec = max(0, round(time_sec))
+            self.update()
+            event.accept()
+            return
+        super().mouseMoveEvent(event)
+
+    # -- Paint -----------------------------------------------------------
 
     def paintEvent(self, event):
         painter = QPainter(self)
@@ -218,7 +288,59 @@ class MethodTimelineTrackWidget(PannableTrackWidget):
         painter.setPen(QPen(QColor("#DADADA"), 1))
         painter.drawLine(0, AUDIO_TRACK_HEIGHT - 1, self.width(), AUDIO_TRACK_HEIGHT - 1)
         painter.drawLine(0, METHOD_TRACK_HEIGHT - 1, self.width(), METHOD_TRACK_HEIGHT - 1)
+
+        self._draw_blade_overlay(painter)
         painter.end()
+
+    def _draw_blade_overlay(self, painter: QPainter):
+        if not self.blade_mode_active:
+            return
+
+        accent = QColor(self.method_spec.accent_color)
+
+        for cut_sec in self.confirmed_cuts:
+            x = self.controller.time_to_view_x(float(cut_sec))
+            if -2 <= x <= self.width() + 2:
+                painter.setPen(QPen(accent, 2))
+                painter.drawLine(int(x), 0, int(x), METHOD_TRACK_HEIGHT)
+
+        if not self._mouse_inside or self._hover_time_sec is None:
+            return
+
+        hover_x = self.controller.time_to_view_x(self._hover_time_sec)
+        painter.setPen(QPen(QColor("#888888"), 1, Qt.DashLine))
+        painter.drawLine(int(hover_x), 0, int(hover_x), METHOD_TRACK_HEIGHT)
+
+        if self._snapped_sec is not None and self._snapped_sec not in self.confirmed_cuts:
+            snap_x = self.controller.time_to_view_x(float(self._snapped_sec))
+            dimmed = QColor(accent)
+            dimmed.setAlpha(100)
+            painter.setPen(QPen(dimmed, 2))
+            painter.drawLine(int(snap_x), 0, int(snap_x), METHOD_TRACK_HEIGHT)
+
+        if self._snapped_sec is not None:
+            prev_boundary = 0
+            for cut in self.confirmed_cuts:
+                if cut < self._snapped_sec:
+                    prev_boundary = cut
+                else:
+                    break
+            upcoming_sec = self._snapped_sec - prev_boundary
+            mins = upcoming_sec // 60
+            secs = upcoming_sec % 60
+            text = f"upcoming: {mins} min {secs:02d} s"
+
+            painter.setFont(QFont("Consolas", 10))
+            fm = painter.fontMetrics()
+            text_w = fm.horizontalAdvance(text) + 16
+            text_h = fm.height() + 8
+            bg_rect = QRectF(8, 8, text_w, text_h)
+            painter.setPen(Qt.NoPen)
+            painter.setBrush(QColor(60, 60, 60, 200))
+            painter.drawRoundedRect(bg_rect, 4, 4)
+            painter.setPen(QColor("#FFFFFF"))
+            painter.setBrush(Qt.NoBrush)
+            painter.drawText(bg_rect, Qt.AlignCenter, text)
 
     def _draw_audio_tiles(self, painter: QPainter, audio_rect: QRectF):
         painter.save()
@@ -329,6 +451,9 @@ class MethodTimelineTrackWidget(PannableTrackWidget):
 class MethodControlPanel(QFrame):
     """Left-side placeholder control block for one VAD method."""
 
+    blade_toggled = pyqtSignal(bool)
+    send_clicked = pyqtSignal()
+
     def __init__(self, method_spec: VadMethodSpec, parent=None):
         super().__init__(parent)
         self.setObjectName("vadControlPanel")
@@ -345,6 +470,28 @@ class MethodControlPanel(QFrame):
         description.setWordWrap(True)
         layout.addWidget(description)
 
+        btn_row = QHBoxLayout()
+        btn_row.setSpacing(6)
+
+        self.blade_button = QPushButton("\u2702")
+        self.blade_button.setCheckable(True)
+        self.blade_button.setToolTip("Toggle blade mode for manual slicing")
+        self.blade_button.setFixedSize(36, 28)
+        self.blade_button.setStyleSheet(
+            "QPushButton { font-size: 16px; }"
+            "QPushButton:checked { background-color: #D0E8FF; border: 1px solid #4A90D9; }"
+        )
+        self.blade_button.clicked.connect(self._on_blade_toggled)
+        btn_row.addWidget(self.blade_button)
+
+        self.send_button = QPushButton("Send Slices")
+        self.send_button.setToolTip("Send confirmed cuts to Transcription tab")
+        self.send_button.setFixedHeight(28)
+        self.send_button.clicked.connect(self.send_clicked.emit)
+        btn_row.addWidget(self.send_button)
+
+        layout.addLayout(btn_row)
+
         for line in ("control block", "placeholder", "future: thresholds / zoom"):
             label = QLabel(line)
             label.setWordWrap(True)
@@ -352,9 +499,19 @@ class MethodControlPanel(QFrame):
 
         layout.addStretch()
 
+    def _on_blade_toggled(self, checked: bool):
+        self.blade_toggled.emit(checked)
+
+    def set_blade_checked(self, checked: bool):
+        self.blade_button.blockSignals(True)
+        self.blade_button.setChecked(checked)
+        self.blade_button.blockSignals(False)
+
 
 class VadMethodRow(QFrame):
     """Composite row with fixed control block and shared-viewport track."""
+
+    send_slices = pyqtSignal(list)
 
     def __init__(
         self,
@@ -382,6 +539,18 @@ class VadMethodRow(QFrame):
 
         layout.addWidget(self.control_panel)
         layout.addWidget(self.track_widget, stretch=1)
+
+        self.control_panel.blade_toggled.connect(self.track_widget.set_blade_mode)
+        self.control_panel.send_clicked.connect(self._on_send_slices)
+
+    def _on_send_slices(self):
+        slices = self.track_widget.get_slices(
+            self.track_widget.controller.duration_sec,
+        )
+        if self.track_widget.blade_mode_active:
+            self.control_panel.set_blade_checked(False)
+            self.track_widget.set_blade_mode(False)
+        self.send_slices.emit(slices)
 
 
 class VadTimelinePanel(QWidget):
@@ -445,9 +614,12 @@ class VadTimelinePanel(QWidget):
         self.controller.reset_view()
 
         for row, method_spec in zip(self.method_rows, self.method_specs):
-            row.track_widget.set_vad_intervals(
-                _build_placeholder_intervals(method_spec.method_key, duration_sec)
-            )
+            if method_spec.method_key == "silero":
+                row.track_widget.set_vad_intervals([])
+            else:
+                row.track_widget.set_vad_intervals(
+                    _build_placeholder_intervals(method_spec.method_key, duration_sec)
+                )
         self._update_all_tracks()
 
     def set_audio_status_message(self, status_message: str):
@@ -456,6 +628,13 @@ class VadTimelinePanel(QWidget):
 
     def set_audio_strength_data(self, strength_series):
         self.tile_store.set_strength_series(strength_series)
+        self._update_all_tracks()
+
+    def set_method_vad_intervals(self, method_key: str, vad_intervals: list[VadInterval]):
+        for row in self.method_rows:
+            if row.method_spec.method_key == method_key:
+                row.track_widget.set_vad_intervals(vad_intervals)
+                break
         self._update_all_tracks()
 
     def clear_timeline(self):

@@ -142,6 +142,12 @@ class WhisperTranscriber:
             None: If transcription fails
         """
         try:
+            # Slice boundaries are expected to be integer seconds.
+            # Normalize defensively so filenames never contain decimal points.
+            display_start = int(display_start)
+            actual_start = int(actual_start)
+            duration = int(duration)
+
             # Set the log callback for configuration manager
             self.config_manager.set_log_callback(log_callback)
 

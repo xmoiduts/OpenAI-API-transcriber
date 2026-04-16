@@ -268,6 +268,26 @@ class TranscriptionNewTab(TabInterface):
         else:
             self.segment_bar.set_segments([])
 
+    def replace_slices(self, file_path, duration, slices):
+        """Replace only the slice data, preserving transcoding settings."""
+        self.file_path = file_path
+        self.duration = duration
+        self.slices = slices
+        if self.file_path and self.duration:
+            display_path = add_zero_wide_char_to_str(self.file_path)
+            self.file_info_label.setText(
+                f"File: {display_path} | Duration: {self.duration:.2f}s")
+            self.transcribe_button.setEnabled(True)
+            self.segment_bar.set_segments(
+                self.slices,
+                self.needs_transcoding,
+                self.target_bitrate,
+            )
+        else:
+            self.file_info_label.setText("No file selected")
+            self.transcribe_button.setEnabled(False)
+            self.segment_bar.set_segments([])
+
     def start_transcription(self):
         if not self.file_path or not self.duration or not self.slices:
             show_flying_message(self, "Missing required information")
