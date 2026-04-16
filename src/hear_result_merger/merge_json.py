@@ -89,19 +89,32 @@ def initialize_json_file_names_and_transcript_segments(target_directory: str) ->
 
 def get_overlap_intervals(transcript_segments):
     """
-    Pad a list of overlap intervals for transcript segments.
+    Pad a list of boundary intervals for transcript segments.
 
     Args:
     transcript_segments (List[Tuple[float, float]]): List of (start, end) times for each segment.
 
     Returns:
-    List[Tuple[float, float]]: Overlap intervals, including start and end points.
-        Format: [(0,0), (overlap1_start, overlap1_end), ..., (last_segment_end, last_segment_end)]
+    List[Tuple[float, float]]: Boundary intervals, including start and end points.
+        Format: [(0,0), (boundary1_left, boundary1_right), ..., (last_segment_end, last_segment_end)]
 
     Note:
-    Assumes 'find_overlapping_intervals' function exists to identify overlaps between segments.
+    Adjacent segments may overlap, touch, or have gaps.
+    We return one interval per boundary so midpoint calculation works for all three cases.
     """
-    return [(0,0)] + find_overlapping_intervals(transcript_segments) + [(transcript_segments[-1][-1],)*2]
+    if not transcript_segments:
+        return []
+
+    boundary_intervals = []
+    for current_segment, next_segment in zip(transcript_segments, transcript_segments[1:]):
+        current_end = current_segment[1]
+        next_start = next_segment[0]
+        boundary_intervals.append((
+            min(current_end, next_start),
+            max(current_end, next_start),
+        ))
+
+    return [(0,0)] + boundary_intervals + [(transcript_segments[-1][-1],)*2]
 
 def get_segment_times(segments, idx):
     """
@@ -116,6 +129,10 @@ def calculate_midpoints(overlaps, idx):
     Every segment overlaps with previous and next one(s), so there are 2
     overlappings and there should be 2 midpoints, named left and right.
     """
+    if idx + 1 >= len(overlaps):
+        raise ValueError(
+            f"Insufficient boundary intervals for segment index {idx}: {overlaps}"
+        )
     print(f"Debug: overlaps={overlaps}, idx={idx}")
     left = (overlaps[idx][1] + overlaps[idx][0]) / 2
     right = (overlaps[idx+1][1] + overlaps[idx+1][0]) / 2
@@ -238,6 +255,11 @@ def merge_jsons(target_directory: str, dedup_method: str = "none") -> Dict:
     Dict: Merged data with duration, text, and words
     """
     json_files, transcript_segments = initialize_json_file_names_and_transcript_segments(target_directory)
+    if not json_files:
+        raise ValueError(
+            "No transcription JSON files found in the directory. "
+            "Expected files matching *_ss<start>-t<duration>_cut_result.json."
+        )
     # overlaps:[(0,0), (30,35), (60,65), ..., (90,90)]
     overlaps = get_overlap_intervals(transcript_segments)
     merged_data = OrderedDict([("duration", 0), ("text", ""), ("words", [])])
