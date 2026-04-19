@@ -34,18 +34,22 @@ def reformat_context(csv_text: str) -> str:
     """
     Reformat CSV-like timestamp data by adding line numbers.
     
-    Input format (each line):
-        start_time end_time "word"
+    Input format (each line, multi-mode payload):
+        start_time end_time word
+        start_time end_time " "
+        start_time end_time "legacy quoted word"
     
     Output format:
         line-number start(s) end(s) word
         1 114.51 116.73 か
         2 116.73 118.57 " "
     
-    Quote handling: Only spaces are quoted, other words are unquoted.
+    Quote handling:
+    - Current convention: only spaces are quoted
+    - Legacy fully-quoted payloads are accepted and normalized
     
     Args:
-        csv_text: CSV-like text with lines in format: start end "word"
+        csv_text: CSV-like text with start/end plus a multi-mode payload field
         
     Returns:
         Reformatted text with line numbers starting from 1
@@ -59,7 +63,7 @@ def reformat_context(csv_text: str) -> str:
         if not line:
             continue
         
-        # Parse: start end "word" or start end word
+        # Parse the two timestamps and keep the remainder as the payload.
         match = re.match(r'^([\d.]+)\s+([\d.]+)\s+(.+)$', line)
         if match:
             start, end, word = match.groups()
@@ -227,7 +231,7 @@ def format_and_retime_context(csv_text: str) -> Tuple[str, int]:
     3. compress_consecutive_times: Replace duplicate end times with ~
     
     Args:
-        csv_text: Raw CSV-like text with lines in format: start end "word"
+        csv_text: Raw CSV-like text with start/end plus a multi-mode payload field
         
     Returns:
         Tuple of (formatted_and_retimed_text, offset_seconds)

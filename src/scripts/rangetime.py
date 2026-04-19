@@ -6,12 +6,16 @@ rangetime.py - Time-based Text ROI Extractor
 Extract text from word timestamp CSV by time range with optional context extension.
 Similar to grep -A -B but for time-based selection.
 
+The parser accepts the project's multi-mode word-timestamp CSV payload:
+- Canonical mode: `start end word`
+- Whitespace-only payloads: `start end " "`
+- Legacy fully-quoted payloads: `start end "word"`
+
 Usage:
     python rangetime.py -i merged_word_timestamps.csv -s 114.51 -t 120.31 -A 10 -B 10
 """
 
 import argparse
-import csv
 import sys
 import re
 
@@ -19,34 +23,48 @@ import re
 def parse_line(line: str) -> tuple[float, float, str] | None:
     """
     Parse a line from the word timestamps file.
-    Format: start_time end_time "text"
-    Example: 74.00 75.00 "あ"
+
+    Supported payload modes after the two timestamps:
+    - canonical unquoted text: `74.00 75.00 あ`
+    - whitespace-only token: `74.00 75.00 " "`
+    - legacy fully-quoted text: `74.00 75.00 "あ"`
     """
     line = line.strip()
     if not line:
         return None
-    
-    # Match pattern: number number "text"
-    # The text field is quoted and may contain spaces
-    match = re.match(r'^([\d.]+)\s+([\d.]+)\s+"(.*)"$', line)
-    if match:
+
+    # Parse the two numeric fields first, then treat the remainder as the raw
+    # payload so unquoted multi-word text is preserved.
+    match = re.match(r'^([\d.]+)\s+([\d.]+)\s+(.+)$', line)
+    if not match:
+        return None
+
+    try:
         start = float(match.group(1))
         end = float(match.group(2))
-        text = match.group(3)
-        return (start, end, text)
-    
-    # Fallback: try space-separated without quotes
-    parts = line.split(maxsplit=2)
-    if len(parts) >= 3:
-        try:
-            start = float(parts[0])
-            end = float(parts[1])
-            text = parts[2].strip('"')
-            return (start, end, text)
-        except ValueError:
-            pass
-    
-    return None
+    except ValueError:
+        return None
+
+    payload = match.group(3)
+
+    # Legacy/full quoted mode: unwrap one layer of CSV-style quotes.
+    if len(payload) >= 2 and payload.startswith('"') and payload.endswith('"'):
+        payload = payload[1:-1].replace('""', '"')
+
+    return (start, end, payload)
+
+
+def format_word_payload(text: str) -> str:
+    """
+    Format a parsed payload back into the project's canonical text form.
+
+    Normal words remain unquoted. Whitespace-only payloads are quoted so they
+    stay visible when printed or copied.
+    """
+    if text.strip() == "":
+        escaped = text.replace('"', '""')
+        return f'"{escaped}"'
+    return text
 
 
 def extract_time_range(
@@ -126,7 +144,7 @@ Examples:
         
         # Output results to stdout
         for start, end, text in results:
-            print(f'{start:.2f} {end:.2f} "{text}"')
+            print(f'{start:.2f} {end:.2f} {format_word_payload(text)}')
         
         # Print summary to stderr
         print(f'\n# Selected {len(results)} entries', file=sys.stderr)

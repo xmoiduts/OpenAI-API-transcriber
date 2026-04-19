@@ -1295,7 +1295,12 @@ class TaskCardsSidebarPanel(QFrame):
             context_lines = []
             for s, e, word, line_num in words:
                 if start_line <= line_num <= end_line:
-                    context_lines.append(f"{s:.2f} {e:.2f} \"{word}\"")
+                    # Keep Assemble input aligned with merged_word_timestamps.csv:
+                    # normal words are unquoted; whitespace-only tokens remain visible as " ".
+                    word_text = str(word)
+                    if word_text == "" or word_text.strip() == "":
+                        word_text = '" "'
+                    context_lines.append(f"{s:.2f} {e:.2f} {word_text}")
             context_text = "\n".join(context_lines)
 
             prompt = prompt_template.replace("{user_input}", user_input or "None")

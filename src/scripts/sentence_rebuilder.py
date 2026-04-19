@@ -3,7 +3,10 @@ Sentence Rebuilder - Rebuilds sentences from word timestamps
 
 Input:
 - sentence_only_timestamp.csv: Contains sentence start timestamps (one per line)
-- merged_word_timestamps.csv: Contains word-level timestamps in format: start end "word"
+- merged_word_timestamps.csv: Contains word-level timestamps in multi-mode format:
+  - canonical: `start end word`
+  - whitespace-only token: `start end " "`
+  - legacy fully-quoted payload: `start end "word"`
 
 Output:
 - Sentence file in format: {start} {end} sentence_content
@@ -12,30 +15,32 @@ Output:
 """
 
 import argparse
-import re
 from pathlib import Path
 from typing import List, Tuple
+
+try:
+    from .rangetime import parse_line
+except ImportError:
+    from rangetime import parse_line
 
 
 def parse_word_timestamps(filepath: Path) -> List[Tuple[float, float, str]]:
     """
     Parse merged_word_timestamps.csv
-    Format: start_time end_time "word"
+
+    Supported payload modes after the two timestamps:
+    - canonical unquoted text: `74.00 75.00 あ`
+    - whitespace-only token: `74.00 75.00 " "`
+    - legacy fully-quoted text: `74.00 75.00 "あ"`
+
     Returns list of (start, end, word) tuples
     """
     words = []
     with open(filepath, 'r', encoding='utf-8') as f:
         for line in f:
-            line = line.strip()
-            if not line:
-                continue
-            # Parse: 74.00 75.00 "あ"
-            # Match: start end "content" where content can contain anything
-            match = re.match(r'^([\d.]+)\s+([\d.]+)\s+"(.*)"\s*$', line)
-            if match:
-                start = float(match.group(1))
-                end = float(match.group(2))
-                word = match.group(3)
+            parsed = parse_line(line)
+            if parsed is not None:
+                start, end, word = parsed
                 words.append((start, end, word))
     return words
 
