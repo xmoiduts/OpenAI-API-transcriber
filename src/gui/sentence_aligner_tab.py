@@ -3,15 +3,14 @@ Sentence Aligner Tab - Experimental module for visually aligning sentence start 
 via audio envelope inspection and AI vision models.
 
 Layout:
-- Top: Drag-and-drop zone for media files (broadcasts from Time Slicer)
+- Top: Drag-and-drop zone for media files or result directories
 - Bottom (horizontal splitter):
-  - Left: Table of bilingual subtitle candidates (from subtitles-bilang.srt)
+  - Left: Table of bilingual sentence-axis candidates
   - Right (vertical splitter):
     - Upper: Waveform drawing zone (ruler + amplitude + subtitle track)
     - Lower: Model selector + options + Send button
 """
 
-import re
 from pathlib import Path
 
 import numpy as np
@@ -32,17 +31,54 @@ from .util.add_zero_wide_char_to_str import add_zero_wide_char_to_str
 from src.configuration_manager.configuration_manager import ConfigManager
 from src.util.filename_sanitizer import FilenameSanitizer
 from src.sentence_aligner.audio_extractor import extract_amplitude_bins
+from src.sentence_aligner.alignment_loader import load_aligned_rows
 
 
 # Padding (seconds) added before/after the selected subtitle for context
 VIEW_PADDING_SEC = 1.0
 
 
-def _srt_ts_to_sec(ts: str) -> float:
-    """Convert SRT timestamp 'HH:MM:SS,mmm' to seconds."""
-    h, m, rest = ts.split(":")
-    s, ms = rest.split(",")
-    return int(h) * 3600 + int(m) * 60 + int(s) + int(ms) / 1000.0
+def _strip_time_token_braces(raw_token: str) -> str:
+    token = raw_token.strip()
+    if token.startswith("{"):
+        token = token[1:]
+    if token.endswith("}"):
+        token = token[:-1]
+    return token.strip()
+
+
+def _format_hover_time(seconds: float) -> str:
+    if seconds < 3600:
+        minutes = int(seconds // 60)
+        secs = seconds - minutes * 60
+        return f"{minutes:02}:{secs:05.2f}"
+
+    hours = int(seconds // 3600)
+    remaining = seconds - hours * 3600
+    minutes = int(remaining // 60)
+    secs = remaining - minutes * 60
+    return f"{hours}:{minutes:02}:{secs:05.2f}"
+
+
+def _format_time_cell(record) -> tuple[str, str]:
+    if record is None:
+        return "", ""
+
+    display_tokens = [
+        _strip_time_token_braces(token)
+        for token in (record.raw_start_token, record.raw_end_token)
+        if token
+    ]
+    display_text = " -> ".join(display_tokens)
+
+    tooltip_tokens = []
+    if record.start_sec is not None:
+        tooltip_tokens.append(_format_hover_time(record.start_sec))
+    if record.end_sec is not None:
+        tooltip_tokens.append(_format_hover_time(record.end_sec))
+    tooltip_text = " -> ".join(tooltip_tokens)
+
+    return display_text, tooltip_text
 
 
 # --------------------------------------------------------- Worker thread --
@@ -82,7 +118,7 @@ class SentenceAlignerTab(TabInterface):
         self.current_file_path = ""
         self.pending_directory = ""
         self.result_directory = ""
-        self.subtitle_entries = []
+        self.aligned_rows = []
 
         self._worker_thread: QThread | None = None
         self._pending_row: int = -1
@@ -103,7 +139,7 @@ class SentenceAlignerTab(TabInterface):
         root_layout.setSpacing(6)
 
         # -- top: drop zone --
-        self.drop_label = QLabel("Drag a media file here, or load via Time Slicer")
+        self.drop_label = QLabel("Drag a media file or result directory here, or load via Time Slicer")
         self.drop_label.setProperty("dropZone", True)
         self.drop_label.setAlignment(Qt.AlignCenter)
         self.drop_label.setFixedHeight(96)
@@ -136,19 +172,22 @@ class SentenceAlignerTab(TabInterface):
         self.setStyleSheet(get_drop_zone_stylesheet() + self._local_stylesheet())
 
     def _build_subtitle_table(self):
-        self.subtitle_table = QTableWidget(0, 3)
-        self.subtitle_table.setHorizontalHeaderLabels(["Time", "Translation", "Original"])
+        self.subtitle_table = QTableWidget(0, 4)
+        self.subtitle_table.setHorizontalHeaderLabels(
+            ["Time (Original)", "Original", "Time (Translation)", "Translation"]
+        )
         self.subtitle_table.setSelectionBehavior(QAbstractItemView.SelectRows)
         self.subtitle_table.setSelectionMode(QAbstractItemView.SingleSelection)
         self.subtitle_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
-        self.subtitle_table.verticalHeader().setVisible(False)
+        self.subtitle_table.verticalHeader().setVisible(True)
         self.subtitle_table.setWordWrap(False)
         self.subtitle_table.setHorizontalScrollMode(QAbstractItemView.ScrollPerPixel)
 
         header = self.subtitle_table.horizontalHeader()
         header.setSectionResizeMode(0, QHeaderView.ResizeToContents)
         header.setSectionResizeMode(1, QHeaderView.Interactive)
-        header.setSectionResizeMode(2, QHeaderView.Interactive)
+        header.setSectionResizeMode(2, QHeaderView.ResizeToContents)
+        header.setSectionResizeMode(3, QHeaderView.Interactive)
         header.setStretchLastSection(True)
 
         self.subtitle_table.currentCellChanged.connect(self._on_current_cell_changed)
@@ -221,7 +260,7 @@ class SentenceAlignerTab(TabInterface):
         self.drop_label.setProperty("dragOver", False)
         self.drop_label.style().unpolish(self.drop_label)
         self.drop_label.style().polish(self.drop_label)
-        self.drop_label.setText("Drag a media file here, or load via Time Slicer")
+        self.drop_label.setText("Drag a media file or result directory here, or load via Time Slicer")
         super().dragLeaveEvent(event)
 
     def dropEvent(self, event):
@@ -230,9 +269,23 @@ class SentenceAlignerTab(TabInterface):
         self.drop_label.style().polish(self.drop_label)
         files = [u.toLocalFile() for u in event.mimeData().urls()]
         if files:
-            self.current_file_path = files[0]
+            dropped_path = Path(files[0])
+            if dropped_path.is_dir():
+                self.pending_directory = str(dropped_path)
+                self.drop_label.setText(f"Loaded directory: {add_zero_wide_char_to_str(str(dropped_path))}")
+                self._try_load_axis_files()
+                return
+
+            parent_dir = dropped_path.parent
+            if self._axis_files_exist(parent_dir):
+                self.pending_directory = str(parent_dir)
+                self.drop_label.setText(f"Loaded directory: {add_zero_wide_char_to_str(str(parent_dir))}")
+                self._try_load_axis_files()
+                return
+
+            self.current_file_path = str(dropped_path)
             display = add_zero_wide_char_to_str(self.current_file_path)
-            self.drop_label.setText(f"Loaded: {display}")
+            self.drop_label.setText(f"Loaded media: {display}")
             self._derive_and_load(self.current_file_path)
 
     # --------------------------------------------------- Broadcast -------
@@ -243,95 +296,137 @@ class SentenceAlignerTab(TabInterface):
             return
         self.current_file_path = file_path
         display = add_zero_wide_char_to_str(file_path)
-        self.drop_label.setText(f"Loaded: {display}")
+        self.drop_label.setText(f"Loaded media: {display}")
         self._derive_and_load(file_path)
 
     # --------------------------------------------------- Derive dir ------
     def _derive_and_load(self, file_path: str):
-        """Derive the transcription result directory and load subtitles-bilang.srt."""
-        input_path = Path(file_path)
-        safe_stem = self.filename_sanitizer.sanitize(input_path.stem)
-        result_dir = self._result_dir_base / safe_stem
-        self.pending_directory = str(result_dir)
-        self._try_load_srt()
+        """Resolve the transcription result directory and load sentence-axis files."""
+        resolved_dir = self._resolve_axis_directory(file_path)
+        self.pending_directory = str(resolved_dir) if resolved_dir is not None else ""
+        self._try_load_axis_files()
 
-    def _try_load_srt(self):
+    def _resolve_axis_directory(self, file_path: str) -> Path | None:
+        candidate_dirs: list[Path] = []
+
+        asr_dir = self._get_asr_target_directory()
+        if asr_dir is not None:
+            candidate_dirs.append(asr_dir)
+
+        if file_path:
+            input_path = Path(file_path)
+            safe_stem = self.filename_sanitizer.sanitize(input_path.stem)
+            derived_dir = self._result_dir_base / safe_stem
+            if derived_dir not in candidate_dirs:
+                candidate_dirs.append(derived_dir)
+
+        for candidate in candidate_dirs:
+            if self._axis_files_exist(candidate):
+                return candidate
+
+        return candidate_dirs[0] if candidate_dirs else None
+
+    def _get_asr_target_directory(self) -> Path | None:
+        main_window = self.window()
+        asr_tab = getattr(main_window, "asr_postprocess_tab", None)
+        target_directory = getattr(asr_tab, "target_directory", "")
+        if not target_directory:
+            return None
+
+        target_path = Path(target_directory)
+        if target_path.exists():
+            return target_path
+        return None
+
+    @staticmethod
+    def _axis_files_exist(directory: Path) -> bool:
+        return (
+            directory / "句轴原文.txt"
+        ).exists() and (
+            directory / "句轴译文.txt"
+        ).exists()
+
+    def _clear_preview(self):
+        self._cancel_worker()
+        self._pending_row = -1
+        self.waveform_widget.clear()
+
+    def _clear_table(self):
+        self.aligned_rows = []
+        self.subtitle_table.clearContents()
+        self.subtitle_table.setRowCount(0)
+
+    def _try_load_axis_files(self):
         if not self.pending_directory:
+            self._clear_table()
+            self._clear_preview()
             return
-        srt_path = Path(self.pending_directory) / "subtitles-bilang.srt"
-        if srt_path.exists():
+
+        result_dir = Path(self.pending_directory)
+        orig_path = result_dir / "句轴原文.txt"
+        trans_path = result_dir / "句轴译文.txt"
+
+        if orig_path.exists() and trans_path.exists():
             self.result_directory = self.pending_directory
-            entries = self._parse_srt(srt_path)
-            self.subtitle_entries = entries
-            self._populate_table(entries)
-            show_flying_message(self, f"Loaded {len(entries)} subtitle entries")
-        else:
-            self.subtitle_table.setRowCount(0)
-            show_flying_message(self, f"subtitles-bilang.srt not found in {self.pending_directory}")
+            self._clear_preview()
+            rows = load_aligned_rows(orig_path, trans_path)
+            self.aligned_rows = rows
+            self._populate_table(rows)
+            show_flying_message(self, f"Loaded {len(rows)} aligned rows")
+            return
+
+        self.result_directory = ""
+        self._clear_table()
+        self._clear_preview()
+        show_flying_message(self, f"句轴原文.txt / 句轴译文.txt not found in {self.pending_directory}")
 
     def showEvent(self, event):
         super().showEvent(event)
         if not self.result_directory and self.pending_directory:
-            self._try_load_srt()
-
-    # --------------------------------------------------- SRT parser ------
-    @staticmethod
-    def _parse_srt(srt_path: Path) -> list:
-        """Parse bilingual SRT into list of dicts with float timestamps."""
-        text = srt_path.read_text(encoding="utf-8")
-        blocks = re.split(r"\n\s*\n", text.strip())
-        entries = []
-        for block in blocks:
-            lines = block.strip().splitlines()
-            if len(lines) < 3:
-                continue
-            time_match = re.match(
-                r"(\d{2}:\d{2}:\d{2},\d{3})\s*-->\s*(\d{2}:\d{2}:\d{2},\d{3})",
-                lines[1],
-            )
-            if not time_match:
-                continue
-            start_ts = time_match.group(1)
-            end_ts = time_match.group(2)
-            translated = lines[2] if len(lines) > 2 else ""
-            original = lines[3] if len(lines) > 3 else ""
-            entries.append({
-                "index": lines[0].strip(),
-                "start": start_ts,
-                "end": end_ts,
-                "start_sec": _srt_ts_to_sec(start_ts),
-                "end_sec": _srt_ts_to_sec(end_ts),
-                "translated": translated.strip(),
-                "original": original.strip(),
-            })
-        return entries
+            self._try_load_axis_files()
 
     # --------------------------------------------------- Table population --
     def _populate_table(self, entries: list):
+        self.subtitle_table.clearContents()
         self.subtitle_table.setRowCount(len(entries))
         mono_font = QFont("Consolas", 11)
 
         for row, e in enumerate(entries):
-            time_item = QTableWidgetItem(e['start'])
-            time_item.setFont(mono_font)
-            self.subtitle_table.setItem(row, 0, time_item)
+            self.subtitle_table.setVerticalHeaderItem(row, QTableWidgetItem(str(row + 1)))
 
-            trans_item = QTableWidgetItem(e["translated"])
-            self.subtitle_table.setItem(row, 1, trans_item)
+            orig_time_text, orig_time_tooltip = _format_time_cell(e.orig_record)
+            orig_time_item = QTableWidgetItem(orig_time_text)
+            orig_time_item.setFont(mono_font)
+            if orig_time_tooltip:
+                orig_time_item.setToolTip(orig_time_tooltip)
+            self.subtitle_table.setItem(row, 0, orig_time_item)
 
-            orig_item = QTableWidgetItem(e["original"])
-            self.subtitle_table.setItem(row, 2, orig_item)
+            orig_text = e.orig_record.text if e.orig_record is not None else ""
+            orig_item = QTableWidgetItem(orig_text)
+            self.subtitle_table.setItem(row, 1, orig_item)
+
+            trans_time_text, trans_time_tooltip = _format_time_cell(e.trans_record)
+            trans_time_item = QTableWidgetItem(trans_time_text)
+            trans_time_item.setFont(mono_font)
+            if trans_time_tooltip:
+                trans_time_item.setToolTip(trans_time_tooltip)
+            self.subtitle_table.setItem(row, 2, trans_time_item)
+
+            trans_text = e.trans_record.text if e.trans_record is not None else ""
+            trans_item = QTableWidgetItem(trans_text)
+            self.subtitle_table.setItem(row, 3, trans_item)
 
         self._resize_columns()
 
     def _resize_columns(self):
-        """Set column widths: time fits content, then translation 40% / original 60%."""
+        """Fit time columns, then split the remaining width across text columns."""
         self.subtitle_table.resizeColumnToContents(0)
-        time_w = self.subtitle_table.columnWidth(0)
+        self.subtitle_table.resizeColumnToContents(2)
+        time_w = self.subtitle_table.columnWidth(0) + self.subtitle_table.columnWidth(2)
         total = self.subtitle_table.viewport().width()
-        remaining = max(total - time_w, 200)
-        self.subtitle_table.setColumnWidth(1, int(remaining * 0.4))
-        self.subtitle_table.setColumnWidth(2, int(remaining * 0.6))
+        remaining = max(total - time_w, 240)
+        self.subtitle_table.setColumnWidth(1, int(remaining * 0.5))
+        self.subtitle_table.setColumnWidth(3, int(remaining * 0.5))
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
@@ -346,19 +441,32 @@ class SentenceAlignerTab(TabInterface):
     # ------------------------------------------------ Waveform loading ----
     def _refresh_drawing_zone(self, row: int):
         """Dispatch waveform extraction to a background thread for the selected row."""
-        if row < 0 or row >= len(self.subtitle_entries):
-            return
-        if not self.current_file_path:
+        if row < 0 or row >= len(self.aligned_rows):
             return
 
-        # Cancel any in-flight extraction
+        aligned_row = self.aligned_rows[row]
+        if (
+            not aligned_row.previewable
+            or aligned_row.preview_start_sec is None
+            or aligned_row.preview_end_sec is None
+        ):
+            self._clear_preview()
+            show_flying_message(self, "Selected row has no safe timeline preview")
+            return
+
+        if not self.current_file_path or not Path(self.current_file_path).exists():
+            self._clear_preview()
+            show_flying_message(self, "Waveform preview needs a loaded media file")
+            return
+
         self._cancel_worker()
 
         self._pending_row = row
-        e = self.subtitle_entries[row]
+        preview_start = aligned_row.preview_start_sec
+        preview_end = aligned_row.preview_end_sec
 
-        view_start = max(e["start_sec"] - VIEW_PADDING_SEC, 0.0)
-        view_end = e["end_sec"] + VIEW_PADDING_SEC
+        view_start = max(preview_start - VIEW_PADDING_SEC, 0.0)
+        view_end = preview_end + VIEW_PADDING_SEC
         view_duration = view_end - view_start
 
         draw_w = max(self.waveform_widget.width() - 100, 200)
@@ -388,21 +496,29 @@ class SentenceAlignerTab(TabInterface):
         """Callback on main thread when amplitude data is ready."""
         if row != self._pending_row:
             return
-        if row < 0 or row >= len(self.subtitle_entries):
+        if row < 0 or row >= len(self.aligned_rows):
             return
 
-        e = self.subtitle_entries[row]
-        view_start = max(e["start_sec"] - VIEW_PADDING_SEC, 0.0)
-        view_end = e["end_sec"] + VIEW_PADDING_SEC
+        aligned_row = self.aligned_rows[row]
+        if (
+            not aligned_row.previewable
+            or aligned_row.preview_start_sec is None
+            or aligned_row.preview_end_sec is None
+        ):
+            self._clear_preview()
+            return
+
+        view_start = max(aligned_row.preview_start_sec - VIEW_PADDING_SEC, 0.0)
+        view_end = aligned_row.preview_end_sec + VIEW_PADDING_SEC
         view_duration = view_end - view_start
 
         self.waveform_widget.set_data(
             amplitudes=amplitudes,
             start_sec=view_start,
             duration_sec=view_duration,
-            subtitle_text=e["original"],
-            sub_start_sec=e["start_sec"],
-            sub_end_sec=e["end_sec"],
+            subtitle_text=aligned_row.preview_text,
+            sub_start_sec=aligned_row.preview_start_sec,
+            sub_end_sec=aligned_row.preview_end_sec,
         )
 
     def _on_waveform_error(self, error_msg: str):

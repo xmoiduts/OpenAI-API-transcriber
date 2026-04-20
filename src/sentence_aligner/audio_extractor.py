@@ -45,13 +45,12 @@ def _decode_pcm(
     sample_rate: int,
 ) -> bytes:
     """Use ffmpeg to decode a segment to raw PCM s16le mono."""
-    cmd = (
+    stream = (
         ffmpeg
         .input(media_path, ss=start_sec, t=duration_sec)
         .output("pipe:", format="s16le", acodec="pcm_s16le", ac=1, ar=sample_rate)
-        .overwrite_output()
-        .compile()
     )
+    cmd = ["ffmpeg", *stream.get_args()]
     process = subprocess.Popen(
         cmd,
         stdout=subprocess.PIPE,
