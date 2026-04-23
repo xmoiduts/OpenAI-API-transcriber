@@ -17,25 +17,46 @@ import numpy as np
 from PyQt5.QtWidgets import (
     QVBoxLayout, QHBoxLayout, QFrame, QSplitter,
     QTableWidget, QTableWidgetItem, QHeaderView, QAbstractItemView,
-    QLabel, QPushButton, QSizePolicy,
+    QLabel, QPushButton, QSizePolicy, QScrollArea,
 )
-from PyQt5.QtCore import Qt, QThread, pyqtSignal
+from PyQt5.QtCore import Qt, QThread, QTimer, pyqtSignal
 from PyQt5.QtGui import QFont
 
 from .tab_interface import TabInterface
 from .styles.style_manager import get_drop_zone_stylesheet
 from .components.model_selector import ModelSelectorWidget
-from .components.waveform_drawing_zone import WaveformDrawingZone
+from .components.waveform_drawing_zone import (
+    WaveformDrawingZone,
+    SentenceEntry,
+    WordEntry,
+    PIXELS_PER_SECOND,
+)
 from .flying_message import show_flying_message
 from .util.add_zero_wide_char_to_str import add_zero_wide_char_to_str
 from src.configuration_manager.configuration_manager import ConfigManager
 from src.util.filename_sanitizer import FilenameSanitizer
 from src.sentence_aligner.audio_extractor import extract_amplitude_bins
 from src.sentence_aligner.alignment_loader import load_aligned_rows
+from src.sentence_aligner.word_timestamps_loader import (
+    WordTimeline,
+    load_word_timeline,
+)
 
 
 # Padding (seconds) added before/after the selected subtitle for context
 VIEW_PADDING_SEC = 1.0
+
+# Upper bound on how many amplitude bins we extract. Anything beyond ~12000
+# bins is indistinguishable at the configured pixels-per-second and just
+# wastes CPU in ffmpeg.
+MAX_WAVEFORM_BINS = 12000
+
+# Fallback duration for trans rects without a usable paired orig range.
+_TRANS_FALLBACK_DURATION_SEC = 1.0
+
+# When two trans rows in the viewport share this close a start time,
+# only the first (in aligned_rows order) is rendered.
+_SAME_START_EPSILON_SEC = 1e-6
 
 
 def _strip_time_token_braces(raw_token: str) -> str:
@@ -119,6 +140,7 @@ class SentenceAlignerTab(TabInterface):
         self.pending_directory = ""
         self.result_directory = ""
         self.aligned_rows = []
+        self.word_timeline: WordTimeline = WordTimeline()
 
         self._worker_thread: QThread | None = None
         self._pending_row: int = -1
@@ -145,6 +167,13 @@ class SentenceAlignerTab(TabInterface):
         self.drop_label.setFixedHeight(96)
         root_layout.addWidget(self.drop_label)
 
+        # -- persistent status line shown when axis files loaded but media is missing --
+        self.media_status_label = QLabel("")
+        self.media_status_label.setProperty("mediaStatus", False)
+        self.media_status_label.setAlignment(Qt.AlignCenter)
+        self.media_status_label.setVisible(False)
+        root_layout.addWidget(self.media_status_label)
+
         # -- bottom: horizontal splitter --
         self.h_splitter = QSplitter(Qt.Horizontal)
 
@@ -156,7 +185,13 @@ class SentenceAlignerTab(TabInterface):
         self.v_splitter = QSplitter(Qt.Vertical)
 
         self.waveform_widget = WaveformDrawingZone()
-        self.v_splitter.addWidget(self.waveform_widget)
+        self.waveform_scroll = QScrollArea()
+        self.waveform_scroll.setWidget(self.waveform_widget)
+        self.waveform_scroll.setWidgetResizable(False)
+        self.waveform_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        self.waveform_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.waveform_scroll.setAlignment(Qt.AlignLeft | Qt.AlignTop)
+        self.v_splitter.addWidget(self.waveform_scroll)
 
         self._build_control_panel()
         self.v_splitter.addWidget(self.control_panel)
@@ -243,6 +278,15 @@ class SentenceAlignerTab(TabInterface):
                 font-weight: bold;
                 font-size: 12px;
             }
+            QLabel[mediaStatus="warn"] {
+                color: #C0392B;
+                background-color: #FDECEA;
+                border: 1px solid #F5C6C0;
+                border-radius: 4px;
+                padding: 4px 8px;
+                font-size: 12px;
+                font-weight: bold;
+            }
         """
 
     # --------------------------------------------------- Drag-and-drop ---
@@ -298,6 +342,7 @@ class SentenceAlignerTab(TabInterface):
         display = add_zero_wide_char_to_str(file_path)
         self.drop_label.setText(f"Loaded media: {display}")
         self._derive_and_load(file_path)
+        self._refresh_media_status()
 
     # --------------------------------------------------- Derive dir ------
     def _derive_and_load(self, file_path: str):
@@ -346,6 +391,24 @@ class SentenceAlignerTab(TabInterface):
             directory / "句轴译文.txt"
         ).exists()
 
+    def _refresh_media_status(self) -> None:
+        """Show/hide the red-light warning when axis files are loaded but media isn't."""
+        need_warning = bool(self.pending_directory) and (
+            not self.current_file_path or not Path(self.current_file_path).exists()
+        )
+        if need_warning:
+            self.media_status_label.setText(
+                "\U0001F534  media not yet loaded, load it in slicer tab"
+            )
+            self.media_status_label.setProperty("mediaStatus", "warn")
+            self.media_status_label.setVisible(True)
+        else:
+            self.media_status_label.setText("")
+            self.media_status_label.setProperty("mediaStatus", False)
+            self.media_status_label.setVisible(False)
+        self.media_status_label.style().unpolish(self.media_status_label)
+        self.media_status_label.style().polish(self.media_status_label)
+
     def _clear_preview(self):
         self._cancel_worker()
         self._pending_row = -1
@@ -353,6 +416,7 @@ class SentenceAlignerTab(TabInterface):
 
     def _clear_table(self):
         self.aligned_rows = []
+        self.word_timeline = WordTimeline()
         self.subtitle_table.clearContents()
         self.subtitle_table.setRowCount(0)
 
@@ -360,6 +424,7 @@ class SentenceAlignerTab(TabInterface):
         if not self.pending_directory:
             self._clear_table()
             self._clear_preview()
+            self._refresh_media_status()
             return
 
         result_dir = Path(self.pending_directory)
@@ -371,14 +436,28 @@ class SentenceAlignerTab(TabInterface):
             self._clear_preview()
             rows = load_aligned_rows(orig_path, trans_path)
             self.aligned_rows = rows
+            self._load_word_timeline(result_dir)
             self._populate_table(rows)
             show_flying_message(self, f"Loaded {len(rows)} aligned rows")
+            self._refresh_media_status()
             return
 
         self.result_directory = ""
         self._clear_table()
         self._clear_preview()
+        self._refresh_media_status()
         show_flying_message(self, f"句轴原文.txt / 句轴译文.txt not found in {self.pending_directory}")
+
+    def _load_word_timeline(self, result_dir: Path) -> None:
+        word_csv = result_dir / "merged_word_timestamps.csv"
+        timeline = load_word_timeline(word_csv)
+        self.word_timeline = timeline
+
+        if timeline.bad_line_count > 0:
+            show_flying_message(
+                self,
+                f"Skipped {timeline.bad_line_count} malformed word timestamp rows",
+            )
 
     def showEvent(self, event):
         super().showEvent(event)
@@ -456,7 +535,10 @@ class SentenceAlignerTab(TabInterface):
 
         if not self.current_file_path or not Path(self.current_file_path).exists():
             self._clear_preview()
-            show_flying_message(self, "Waveform preview needs a loaded media file")
+            # The persistent red-light warning in the drop zone already explains this;
+            # only show the transient message if the warning label is not visible.
+            if not self.media_status_label.isVisible():
+                show_flying_message(self, "Waveform preview needs a loaded media file")
             return
 
         self._cancel_worker()
@@ -469,8 +551,8 @@ class SentenceAlignerTab(TabInterface):
         view_end = preview_end + VIEW_PADDING_SEC
         view_duration = view_end - view_start
 
-        draw_w = max(self.waveform_widget.width() - 100, 200)
-        num_bins = min(draw_w, 1200)
+        num_bins = max(int(round(view_duration * PIXELS_PER_SECOND)), 200)
+        num_bins = min(num_bins, MAX_WAVEFORM_BINS)
 
         thread = _WaveformThread(self.current_file_path, view_start, view_duration, num_bins)
         thread.result_ready.connect(lambda amps, r=row: self._on_waveform_ready(amps, r))
@@ -512,15 +594,125 @@ class SentenceAlignerTab(TabInterface):
         view_end = aligned_row.preview_end_sec + VIEW_PADDING_SEC
         view_duration = view_end - view_start
 
+        orig_entries = self._collect_sentence_entries(view_start, view_end, side="orig")
+        trans_entries = self._collect_trans_entries(view_start, view_end)
+        word_entries = self._collect_word_entries(view_start, view_end)
+
         self.waveform_widget.set_data(
             amplitudes=amplitudes,
             start_sec=view_start,
             duration_sec=view_duration,
-            subtitle_text=aligned_row.preview_text,
-            sub_start_sec=aligned_row.preview_start_sec,
-            sub_end_sec=aligned_row.preview_end_sec,
+            orig_entries=orig_entries,
+            trans_entries=trans_entries,
+            word_entries=word_entries,
+            selected_row_key=aligned_row.row_key,
         )
+
+        QTimer.singleShot(0, self._center_scroll_on_selection)
 
     def _on_waveform_error(self, error_msg: str):
         show_flying_message(self, f"Waveform error: {error_msg}")
         self.waveform_widget.clear()
+
+    # ---------------------------------------------- Entry builders --------
+    def _collect_sentence_entries(
+        self,
+        view_start: float,
+        view_end: float,
+        side: str,
+    ) -> list:
+        """Linear scan of aligned_rows; picks records whose [start,end] overlaps view."""
+        entries: list[SentenceEntry] = []
+        for aligned_row in self.aligned_rows:
+            record = aligned_row.orig_record if side == "orig" else aligned_row.trans_record
+            if record is None or not record.has_valid_range:
+                continue
+            if record.end_sec <= view_start or record.start_sec >= view_end:
+                continue
+            entries.append(
+                SentenceEntry(
+                    start_sec=float(record.start_sec),
+                    end_sec=float(record.end_sec),
+                    text=record.text or "",
+                    row_key=aligned_row.row_key,
+                )
+            )
+        return entries
+
+    def _collect_trans_entries(self, view_start: float, view_end: float) -> list:
+        """Build translation-track entries.
+
+        Policy:
+        - Paired 原文 row with valid range -> borrow its [start, end] so the
+          trans rect aligns directly under the matching 原文 rect.
+        - Unpaired trans rows (or paired with start-only orig) -> fixed 1s bar
+          starting at trans.start_sec.
+        - If multiple in-view trans rows share the same start (within epsilon),
+          keep only the first one in aligned_rows order.
+        """
+        entries: list[SentenceEntry] = []
+        seen_starts: list[float] = []
+
+        for aligned_row in self.aligned_rows:
+            trans = aligned_row.trans_record
+            if trans is None or trans.start_sec is None:
+                continue
+
+            orig = aligned_row.orig_record
+            if orig is not None and orig.has_valid_range:
+                start = float(orig.start_sec)
+                end = float(orig.end_sec)
+            else:
+                start = float(trans.start_sec)
+                end = start + _TRANS_FALLBACK_DURATION_SEC
+
+            if end <= view_start or start >= view_end:
+                continue
+
+            if any(abs(start - s) < _SAME_START_EPSILON_SEC for s in seen_starts):
+                continue
+            seen_starts.append(start)
+
+            entries.append(
+                SentenceEntry(
+                    start_sec=start,
+                    end_sec=end,
+                    text=trans.text or "",
+                    row_key=aligned_row.row_key,
+                )
+            )
+        return entries
+
+    def _collect_word_entries(self, view_start: float, view_end: float) -> list:
+        timeline = self.word_timeline
+        if timeline is None or timeline.is_empty():
+            return []
+
+        idx = timeline.query(view_start, view_end)
+        if idx.size == 0:
+            return []
+
+        starts = timeline.starts
+        ends = timeline.ends
+        texts = timeline.texts
+        return [
+            WordEntry(
+                start_sec=float(starts[i]),
+                end_sec=float(ends[i]),
+                text=texts[i],
+            )
+            for i in idx
+        ]
+
+    # ---------------------------------------------- Scroll helper --------
+    def _center_scroll_on_selection(self) -> None:
+        """Snap the horizontal scroll so the selected sentence is centered."""
+        if not hasattr(self, "waveform_scroll"):
+            return
+        mid_x = self.waveform_widget.selected_sentence_midpoint_x()
+        if mid_x is None:
+            return
+        viewport_w = self.waveform_scroll.viewport().width()
+        target = max(mid_x - viewport_w // 2, 0)
+        bar = self.waveform_scroll.horizontalScrollBar()
+        bar.setValue(min(target, bar.maximum()))
