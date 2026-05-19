@@ -17,6 +17,7 @@ from PyQt5.QtWidgets import (
     QWidget,
 )
 
+from src.vad.models import AudioStrengthPatch, VadTimeRange
 from .tile_store import AudioStrengthTileStore
 from .timeline_controller import TimelineController
 
@@ -26,6 +27,8 @@ AUDIO_TRACK_HEIGHT = 108
 VAD_TRACK_HEIGHT = 38
 METHOD_TRACK_HEIGHT = AUDIO_TRACK_HEIGHT + VAD_TRACK_HEIGHT
 CONTROL_PANEL_WIDTH = 220
+PROGRESS_BAR_HEIGHT = 8
+PROGRESS_BAR_MARGIN = 6
 
 
 @dataclass(frozen=True)
@@ -208,9 +211,20 @@ class MethodTimelineTrackWidget(PannableTrackWidget):
         self._hover_time_sec: float | None = None
         self._snapped_sec: int | None = None
         self._mouse_inside = False
+        self.processed_ranges: list[VadTimeRange] = []
+        self.active_ranges: list[VadTimeRange] = []
 
     def set_vad_intervals(self, vad_intervals: list[VadInterval]):
         self.vad_intervals = vad_intervals
+        self.update()
+
+    def set_processing_state(
+        self,
+        processed_ranges: list[VadTimeRange],
+        active_ranges: list[VadTimeRange],
+    ):
+        self.processed_ranges = list(processed_ranges)
+        self.active_ranges = list(active_ranges)
         self.update()
 
     def set_blade_mode(self, active: bool):
@@ -347,6 +361,16 @@ class MethodTimelineTrackWidget(PannableTrackWidget):
         painter.setClipRect(audio_rect)
         painter.fillRect(audio_rect, QColor("#F5F8FC"))
 
+        self._draw_progress_strip(
+            painter,
+            QRectF(
+                audio_rect.left(),
+                audio_rect.top(),
+                audio_rect.width(),
+                PROGRESS_BAR_HEIGHT,
+            ),
+        )
+
         if not self.tile_store.has_strength_series():
             painter.setPen(QColor("#7D8899"))
             painter.setFont(QFont("Segoe UI", 10))
@@ -357,6 +381,12 @@ class MethodTimelineTrackWidget(PannableTrackWidget):
             )
             painter.restore()
             return
+
+        self._draw_active_range_overlay(
+            painter,
+            audio_rect.adjusted(0, PROGRESS_BAR_HEIGHT + PROGRESS_BAR_MARGIN, 0, 0),
+            fill_color=QColor(74, 144, 217, 36),
+        )
 
         tile_width = self.tile_store.tile_width_px
         offset_px = self.controller.offset_px
@@ -387,17 +417,26 @@ class MethodTimelineTrackWidget(PannableTrackWidget):
             draw_x = tile_index * tile_width - offset_px
             painter.drawPixmap(int(draw_x), int(audio_rect.top()), pixmap)
 
+        if self.tile_store.get_status_message():
+            painter.setPen(QColor("#6A788D"))
+            painter.setFont(QFont("Segoe UI", 8))
+            painter.drawText(
+                QRectF(12, 46, min(self.width() - 24, 520), 16),
+                Qt.AlignLeft | Qt.AlignVCenter,
+                self.tile_store.get_status_message(),
+            )
+
         painter.setPen(QColor("#44546A"))
         painter.setFont(QFont("Segoe UI", 10))
         painter.drawText(
-            QRectF(12, 8, min(self.width() - 24, 320), 20),
+            QRectF(12, 16, min(self.width() - 24, 320), 20),
             Qt.AlignLeft | Qt.AlignVCenter,
             f"{self.method_spec.title} strength",
         )
         painter.setPen(QColor("#96A2B5"))
         painter.setFont(QFont("Segoe UI", 8))
         painter.drawText(
-            QRectF(12, 28, min(self.width() - 24, 460), 16),
+            QRectF(12, 34, min(self.width() - 24, 460), 16),
             Qt.AlignLeft | Qt.AlignVCenter,
             f"Actual audio strength tiles (50 samples/sec, zoom {self.controller.pixels_per_sample:.2f} px/sample)",
         )
@@ -406,7 +445,16 @@ class MethodTimelineTrackWidget(PannableTrackWidget):
     def _draw_vad_overlay(self, painter: QPainter, vad_rect: QRectF):
         painter.save()
         painter.setClipRect(vad_rect)
-        painter.fillRect(vad_rect, QColor("#FAFAFA"))
+        painter.fillRect(vad_rect, QColor("#ECEFF3"))
+
+        processed_fill = QColor("#FAFAFA")
+        self._draw_time_ranges(painter, vad_rect, self.processed_ranges, processed_fill)
+        self._draw_time_ranges(
+            painter,
+            vad_rect,
+            self.active_ranges,
+            QColor(74, 144, 217, 52),
+        )
 
         start_sec, end_sec = self.controller.visible_time_range()
         accent = QColor(self.method_spec.accent_color)
@@ -445,6 +493,45 @@ class MethodTimelineTrackWidget(PannableTrackWidget):
             Qt.AlignLeft | Qt.AlignVCenter,
             "VAD overlay track",
         )
+        painter.restore()
+
+    def _draw_progress_strip(self, painter: QPainter, strip_rect: QRectF):
+        painter.save()
+        painter.setPen(Qt.NoPen)
+        painter.setBrush(QColor("#D5DADF"))
+        painter.drawRect(strip_rect)
+        self._draw_time_ranges(painter, strip_rect, self.processed_ranges, QColor("#58B36A"))
+        self._draw_time_ranges(painter, strip_rect, self.active_ranges, QColor("#4A90D9"))
+        painter.setPen(QPen(QColor("#C2C8D0"), 1))
+        painter.setBrush(Qt.NoBrush)
+        painter.drawRect(strip_rect.adjusted(0, 0, -1, -1))
+        painter.restore()
+
+    def _draw_active_range_overlay(self, painter: QPainter, rect: QRectF, fill_color: QColor):
+        if rect.height() <= 0:
+            return
+        self._draw_time_ranges(painter, rect, self.active_ranges, fill_color)
+
+    def _draw_time_ranges(
+        self,
+        painter: QPainter,
+        target_rect: QRectF,
+        time_ranges: list[VadTimeRange],
+        fill_color: QColor,
+    ):
+        if not time_ranges:
+            return
+        painter.save()
+        painter.setPen(Qt.NoPen)
+        painter.setBrush(fill_color)
+        for time_range in time_ranges:
+            x1 = self.controller.time_to_view_x(time_range.start_sec)
+            x2 = self.controller.time_to_view_x(time_range.end_sec)
+            rect_left = max(x1, target_rect.left())
+            rect_right = min(x2, target_rect.right())
+            if rect_right <= rect_left:
+                continue
+            painter.drawRect(QRectF(rect_left, target_rect.top(), rect_right - rect_left, target_rect.height()))
         painter.restore()
 
 
@@ -562,6 +649,8 @@ class VadTimelinePanel(QWidget):
         self.controller = TimelineController(parent=self)
         self.tile_store = AudioStrengthTileStore()
         self.method_rows = []
+        self._processed_ranges: list[VadTimeRange] = []
+        self._active_ranges: list[VadTimeRange] = []
         self._init_ui()
 
     def _init_ui(self):
@@ -612,6 +701,8 @@ class VadTimelinePanel(QWidget):
         self.tile_store.clear()
         self.controller.set_duration(duration_sec)
         self.controller.reset_view()
+        self._processed_ranges = []
+        self._active_ranges = []
 
         for row, method_spec in zip(self.method_rows, self.method_specs):
             if method_spec.method_key == "silero":
@@ -626,9 +717,41 @@ class VadTimelinePanel(QWidget):
         self.tile_store.set_status_message(status_message)
         self._update_all_tracks()
 
-    def set_audio_strength_data(self, strength_series):
-        self.tile_store.set_strength_series(strength_series)
+    def set_audio_strength_data(self, strength_series, peak_value=None):
+        self.tile_store.set_strength_series(strength_series, peak_value=peak_value)
         self._update_all_tracks()
+
+    def apply_audio_strength_patch(self, amplitude_patch: AudioStrengthPatch, peak_value=None):
+        self.tile_store.apply_strength_patch(
+            start_index=amplitude_patch.start_index,
+            values=amplitude_patch.values,
+            peak_value=peak_value,
+        )
+        self._update_all_tracks()
+
+    def set_audio_peak(self, peak_value: float | None):
+        self.tile_store.set_peak_value(peak_value)
+        self._update_all_tracks()
+
+    def set_processing_state(
+        self,
+        processed_ranges: list[VadTimeRange],
+        active_ranges: list[VadTimeRange],
+    ):
+        self._processed_ranges = list(processed_ranges)
+        self._active_ranges = list(active_ranges)
+        if not self.tile_store.has_strength_series():
+            sample_count = max(
+                int(math.ceil(self.controller.duration_sec * self.controller.samples_per_second)),
+                1,
+            )
+            self.tile_store.initialize_empty_series(sample_count)
+        for row in self.method_rows:
+            row.track_widget.set_processing_state(self._processed_ranges, self._active_ranges)
+        self._update_all_tracks()
+
+    def clear_active_processing(self):
+        self.set_processing_state(self._processed_ranges, [])
 
     def set_method_vad_intervals(self, method_key: str, vad_intervals: list[VadInterval]):
         for row in self.method_rows:
@@ -641,8 +764,11 @@ class VadTimelinePanel(QWidget):
         self.tile_store.clear()
         self.controller.set_duration(7200.0)
         self.controller.reset_view()
+        self._processed_ranges = []
+        self._active_ranges = []
         for row in self.method_rows:
             row.track_widget.set_vad_intervals([])
+            row.track_widget.set_processing_state([], [])
         self.tile_store.set_status_message("Waiting for media broadcast")
         self._update_all_tracks()
 

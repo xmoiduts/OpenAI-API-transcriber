@@ -1,11 +1,6 @@
-"""
-Audio strength extraction for the VAD experimental timeline.
+"""Audio strength extraction helpers for the VAD experimental timeline."""
 
-Pipeline:
-- ffmpeg decodes the full media audio track to mono PCM
-- RMS strength is aggregated incrementally into fixed-rate bins
-- output is normalized to [0, 1] for timeline rendering
-"""
+from __future__ import annotations
 
 import math
 import subprocess
@@ -13,9 +8,15 @@ import subprocess
 import ffmpeg
 import numpy as np
 
+from src.vad.models import VadTimeRange
+
 
 class AudioStrengthExtractionCancelled(Exception):
     """Raised when a long-running audio extraction is cancelled."""
+
+
+def strength_bin_count(duration_sec: float, points_per_second: int) -> int:
+    return max(int(math.ceil(max(float(duration_sec), 0.0) * int(points_per_second))), 1)
 
 
 def extract_audio_strength_series(
@@ -24,8 +25,52 @@ def extract_audio_strength_series(
     points_per_second: int = 50,
     sample_rate: int = 8000,
     should_stop=None,
+    normalize: bool = True,
 ) -> np.ndarray:
-    """Extract full-length normalized RMS bins for a media file."""
+    """Extract full-length RMS bins for a media file."""
+    expected_bins = strength_bin_count(duration_sec, points_per_second)
+    return _extract_audio_strength_bins(
+        media_path=media_path,
+        expected_bins=expected_bins,
+        points_per_second=points_per_second,
+        sample_rate=sample_rate,
+        should_stop=should_stop,
+        normalize=normalize,
+    )
+
+
+def extract_audio_strength_range_series(
+    media_path: str,
+    time_range: VadTimeRange,
+    points_per_second: int = 50,
+    sample_rate: int = 8000,
+    should_stop=None,
+    normalize: bool = False,
+) -> np.ndarray:
+    """Extract range-scoped RMS bins aligned to the provided range."""
+    expected_bins = strength_bin_count(time_range.duration_sec, points_per_second)
+    return _extract_audio_strength_bins(
+        media_path=media_path,
+        expected_bins=expected_bins,
+        points_per_second=points_per_second,
+        sample_rate=sample_rate,
+        should_stop=should_stop,
+        normalize=normalize,
+        start_sec=time_range.start_sec,
+        duration_sec=time_range.duration_sec,
+    )
+
+
+def _extract_audio_strength_bins(
+    media_path: str,
+    expected_bins: int,
+    points_per_second: int,
+    sample_rate: int,
+    should_stop=None,
+    normalize: bool = True,
+    start_sec: float | None = None,
+    duration_sec: float | None = None,
+) -> np.ndarray:
     if points_per_second <= 0:
         raise ValueError("points_per_second must be positive")
     if sample_rate <= 0:
@@ -33,12 +78,16 @@ def extract_audio_strength_series(
     if sample_rate % points_per_second != 0:
         raise ValueError("sample_rate must be divisible by points_per_second")
 
-    expected_bins = max(int(math.ceil(max(duration_sec, 0.0) * points_per_second)), 1)
     samples_per_bin = sample_rate // points_per_second
+    input_kwargs = {}
+    if start_sec is not None:
+        input_kwargs["ss"] = float(start_sec)
+    if duration_sec is not None:
+        input_kwargs["t"] = float(duration_sec)
 
     cmd = (
         ffmpeg
-        .input(media_path)
+        .input(media_path, **input_kwargs)
         .output("pipe:", format="s16le", acodec="pcm_s16le", ac=1, ar=sample_rate)
         .global_args("-loglevel", "error")
         .overwrite_output()
@@ -67,7 +116,7 @@ def extract_audio_strength_series(
             if not chunk:
                 break
 
-            samples = np.frombuffer(chunk, dtype=np.int16).astype(np.float32)
+            samples = np.frombuffer(chunk, dtype=np.int16).astype(np.float32) / 32768.0
             cursor = 0
             while cursor < len(samples):
                 if should_stop is not None and should_stop():
@@ -112,8 +161,9 @@ def extract_audio_strength_series(
     elif len(series) > expected_bins:
         series = series[:expected_bins]
 
-    peak = float(series.max())
-    if peak > 0:
-        series /= peak
+    if normalize:
+        peak = float(series.max())
+        if peak > 0:
+            series /= peak
 
     return series.astype(np.float32)

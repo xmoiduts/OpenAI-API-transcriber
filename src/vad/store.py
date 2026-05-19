@@ -20,6 +20,9 @@ class InMemoryVadResultStore:
             return None
         return deepcopy(result)
 
+    def set_result(self, result: VadAnalysisResult):
+        self._results[(result.media_path, result.engine_key)] = deepcopy(result)
+
     def merge_range_result(
         self,
         media_path: str,

@@ -338,6 +338,10 @@ tasks:
         note: openai basic whisper model
       whisper-large-v3:
         note: claimed higher quality than whisper-1, but may be tuned too aggresive
+  vad:
+    parallel_workers: 4
+    slice_minutes: 2
+    parallel_min_duration_seconds: 900
   sentence-builder:
     merge_overlaps:
       default-thinking-level: auto

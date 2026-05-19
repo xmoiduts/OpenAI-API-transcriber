@@ -93,3 +93,15 @@ class ConfigManager:
     def get_paths_config(self) -> Dict[str, str]:
         """Get paths configuration"""
         return self._config.get('paths', {})
+
+    def get_task_config(self, task_name: str) -> Dict[str, Any]:
+        """Get configuration for a specific task block."""
+        return self._config.get('tasks', {}).get(task_name, {})
+
+    def get_vad_config(self) -> Dict[str, Any]:
+        """Get VAD task configuration with stable defaults."""
+        config = dict(self.get_task_config('vad') or {})
+        config.setdefault('parallel_workers', 4)
+        config.setdefault('slice_minutes', 2)
+        config.setdefault('parallel_min_duration_seconds', 900)
+        return config

@@ -44,6 +44,11 @@ class VadApplicationService:
                 sample_rate=request.amplitude_sample_rate,
                 should_stop=should_stop,
             )
+            if output.amplitude_series is not None:
+                try:
+                    output.amplitude_peak = float(output.amplitude_series.max())
+                except Exception:
+                    output.amplitude_peak = None
 
         if request.include_vad:
             engine = self._engines.get(request.engine_key)

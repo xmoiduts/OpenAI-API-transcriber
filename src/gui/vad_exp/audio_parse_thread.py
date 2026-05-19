@@ -1,6 +1,7 @@
 from PyQt5.QtCore import QThread, pyqtSignal
 
 from src.vad.models import VadAnalysisRequest, VadProcessingCancelled, VadTimeRange
+from src.vad.coordinator import ChunkedVadCoordinator, ParallelVadConfig
 from src.vad.service import VadApplicationService
 from src.vad_exp.audio_strength_extractor import AudioStrengthExtractionCancelled
 
@@ -13,6 +14,7 @@ class AudioParseThread(QThread):
     """
 
     success = pyqtSignal(int, object)  # generation, VadAnalysisOutput
+    partial_update = pyqtSignal(int, object)  # generation, VadPartialAnalysisOutput
     failed = pyqtSignal(int, str)
     cancelled = pyqtSignal(int)
 
@@ -27,6 +29,8 @@ class AudioParseThread(QThread):
         include_amplitude: bool = True,
         include_vad: bool = True,
         engine_key: str = "silero",
+        parallel_config: ParallelVadConfig | None = None,
+        engine_factory=None,
         parent=None,
     ):
         super().__init__(parent)
@@ -39,24 +43,43 @@ class AudioParseThread(QThread):
         self.include_amplitude = include_amplitude
         self.include_vad = include_vad
         self.engine_key = engine_key
+        self.parallel_config = parallel_config
+        self.engine_factory = engine_factory
         self._stop_requested = False
 
     def stop(self):
         self._stop_requested = True
 
     def run(self):
+        request = VadAnalysisRequest(
+            media_path=self.media_path,
+            time_range=VadTimeRange(self.start_sec, self.end_sec),
+            media_duration_sec=self.duration_sec,
+            engine_key=self.engine_key,
+            include_amplitude=self.include_amplitude,
+            include_vad=self.include_vad,
+        )
         try:
-            result = self.service.request_analysis(
-                VadAnalysisRequest(
-                    media_path=self.media_path,
-                    time_range=VadTimeRange(self.start_sec, self.end_sec),
-                    media_duration_sec=self.duration_sec,
-                    engine_key=self.engine_key,
-                    include_amplitude=self.include_amplitude,
-                    include_vad=self.include_vad,
-                ),
-                should_stop=lambda: self._stop_requested,
-            )
+            if (
+                self.parallel_config is not None
+                and self.engine_factory is not None
+                and ChunkedVadCoordinator.should_use_parallel(request, self.parallel_config)
+            ):
+                coordinator = ChunkedVadCoordinator(
+                    engine_factory=self.engine_factory,
+                    final_store=self.service.store,
+                )
+                result = coordinator.run(
+                    request=request,
+                    config=self.parallel_config,
+                    should_stop=lambda: self._stop_requested,
+                    on_partial_update=lambda update: self.partial_update.emit(self.generation, update),
+                )
+            else:
+                result = self.service.request_analysis(
+                    request,
+                    should_stop=lambda: self._stop_requested,
+                )
         except (AudioStrengthExtractionCancelled, VadProcessingCancelled):
             self.cancelled.emit(self.generation)
             return

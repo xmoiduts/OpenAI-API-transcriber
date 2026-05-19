@@ -101,9 +101,27 @@ class VadAnalysisRequest:
             raise ValueError("at least one of include_amplitude/include_vad must be True")
 
 
+@dataclass(frozen=True)
+class AudioStrengthPatch:
+    time_range: VadTimeRange
+    start_index: int
+    values: object
+
+
+@dataclass
+class VadPartialAnalysisOutput:
+    amplitude_patch: Optional[AudioStrengthPatch] = None
+    amplitude_peak: float | None = None
+    vad_result: Optional[VadAnalysisResult] = None
+    processed_ranges: list[VadTimeRange] = field(default_factory=list)
+    active_ranges: list[VadTimeRange] = field(default_factory=list)
+    status_message: str = ""
+
+
 @dataclass
 class VadAnalysisOutput:
     amplitude_series: object | None = None
+    amplitude_peak: float | None = None
     vad_result: Optional[VadAnalysisResult] = None
     analyzed_segments: list[SpeechSegment] = field(default_factory=list)
     status_message: str = ""
