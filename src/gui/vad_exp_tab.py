@@ -1,15 +1,18 @@
 from PyQt5.QtCore import Qt
 from PyQt5.QtWidgets import QLabel, QVBoxLayout, QFrame, QHBoxLayout, QPushButton
+from pathlib import Path
 
 from src.configuration_manager.configuration_manager import ConfigManager
-from src.gui.flying_message import show_countdown_message
+from src.gui.flying_message import show_countdown_message, show_flying_message
+from src.util.filename_sanitizer import FilenameSanitizer
 from src.vad.auto_slicer import (
     build_probe_range,
     choose_auto_cut_point,
     get_slice_length_preset,
 )
 from src.vad.coordinator import ParallelVadConfig
-from src.vad.models import VadTimeRange
+from src.vad.exporters import build_empty_sentences_srt_filename, export_vad_blocks_to_srt
+from src.vad.models import SpeechSegment, VadTimeRange
 from .tab_interface import TabInterface
 from .styles.style_manager import get_drop_zone_stylesheet, get_scrollbar_stylesheet
 from .util.add_zero_wide_char_to_str import add_zero_wide_char_to_str
@@ -49,6 +52,11 @@ class VADExpTab(TabInterface):
         self.default_slice_preset = self.slicer_preferences.load_slice_length_preset()
         self.vad_service = VadApplicationService([SileroVadEngine()])
         self.parallel_config = self._load_parallel_config()
+        config_manager = ConfigManager()
+        paths = config_manager.get_paths_config()
+        result_dir = Path(paths.get("result_dir", "./transcription_result"))
+        self.filename_sanitizer = FilenameSanitizer(result_dir)
+        self.result_dir_base = result_dir
         self.method_specs = [
             VadMethodSpec(
                 method_key=SILERO_ENGINE_KEY,
@@ -114,6 +122,7 @@ class VADExpTab(TabInterface):
 
         for row in self.timeline_panel.method_rows:
             row.send_slices.connect(self._on_row_send_slices)
+            row.export_vad_blocks.connect(self._on_row_export_vad_blocks)
             row.manual_cut_created.connect(self._on_row_manual_cut_created)
             row.auto_toggled.connect(self._on_row_auto_toggled)
             row.slice_length_changed.connect(self._on_row_slice_length_changed)
@@ -507,6 +516,46 @@ class VADExpTab(TabInterface):
                 self.current_duration,
                 slices,
             )
+
+    def _on_row_export_vad_blocks(self, row):
+        if not self.current_file_path:
+            show_flying_message(self, "Please load media first.")
+            return
+
+        engine_key = row.method_spec.method_key
+        speech_segments = self._collect_export_speech_segments(row, engine_key)
+        if not speech_segments:
+            show_flying_message(self, "No VAD blocks to export.")
+            return
+
+        try:
+            output_dir = self._resolve_transcription_result_dir()
+            filename = build_empty_sentences_srt_filename(row.method_spec.title)
+            output_path = str(output_dir / filename)
+            result = export_vad_blocks_to_srt(speech_segments, output_path)
+            show_flying_message(
+                self,
+                f"Exported {result['num_entries']} VAD blocks to {result['output_path']}",
+            )
+        except Exception as exc:
+            show_flying_message(self, f"Error: {exc}")
+
+    def _collect_export_speech_segments(self, row, engine_key: str) -> list[SpeechSegment]:
+        cached = self.vad_service.get_cached_result(self.current_file_path, engine_key)
+        if cached is not None and cached.speech_segments:
+            return list(cached.speech_segments)
+
+        return [
+            SpeechSegment(start_sec=interval.start_sec, end_sec=interval.end_sec)
+            for interval in row.track_widget.vad_intervals
+        ]
+
+    def _resolve_transcription_result_dir(self) -> Path:
+        file_stem = Path(self.current_file_path).stem
+        safe_file_stem = self.filename_sanitizer.sanitize(file_stem)
+        output_dir = self.result_dir_base / safe_file_stem
+        output_dir.mkdir(parents=True, exist_ok=True)
+        return output_dir
 
     def _get_main_window(self):
         parent = self.parent()

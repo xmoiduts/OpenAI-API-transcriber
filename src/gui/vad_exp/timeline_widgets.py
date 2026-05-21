@@ -566,6 +566,7 @@ class MethodControlPanel(QFrame):
     manual_toggled = pyqtSignal(bool)
     auto_toggled = pyqtSignal(bool)
     send_clicked = pyqtSignal()
+    export_vad_clicked = pyqtSignal()
     slice_length_changed = pyqtSignal(str)
 
     def __init__(self, method_spec: VadMethodSpec, supports_auto_slice: bool = True, parent=None):
@@ -670,6 +671,17 @@ class MethodControlPanel(QFrame):
         self.send_button.clicked.connect(self.send_clicked.emit)
         panel_layout.addWidget(self.send_button)
 
+        self.export_vad_button = NoteButton(
+            "Export VAD block",
+            "Export current VAD speech blocks as placeholder SRT entries (body: .).",
+            self.note_label,
+        )
+        self.export_vad_button.setMinimumHeight(30)
+        self.export_vad_button.setEnabled(self.supports_auto_slice)
+        self.export_vad_button.setStyleSheet(_slice_tool_button_stylesheet())
+        self.export_vad_button.clicked.connect(self.export_vad_clicked.emit)
+        panel_layout.addWidget(self.export_vad_button)
+
         self.tool_panel.hide()
         self.tool_panel.setMinimumWidth(320)
         self.tool_panel.setStyleSheet(_slice_tool_panel_stylesheet())
@@ -739,12 +751,14 @@ class MethodControlPanel(QFrame):
     def _apply_manual_state(self, active: bool):
         self.auto_button.setEnabled(not active and self.supports_auto_slice)
         self.send_button.setEnabled(not active)
+        self.export_vad_button.setEnabled(not active and self.supports_auto_slice)
         for button in self.length_buttons.values():
             button.setEnabled(not active)
 
     def _apply_auto_state(self, active: bool):
         self.manual_button.setEnabled(not active)
         self.send_button.setEnabled(not active)
+        self.export_vad_button.setEnabled(not active and self.supports_auto_slice)
         for button in self.length_buttons.values():
             button.setEnabled(not active)
 
@@ -766,6 +780,7 @@ class MethodControlPanel(QFrame):
             self.manual_button.setEnabled(enabled)
             self.auto_button.setEnabled(enabled and self.supports_auto_slice)
             self.send_button.setEnabled(enabled)
+            self.export_vad_button.setEnabled(enabled and self.supports_auto_slice)
             for button in self.length_buttons.values():
                 button.setEnabled(enabled)
 
@@ -774,6 +789,7 @@ class VadMethodRow(QFrame):
     """Composite row with fixed control block and shared-viewport track."""
 
     send_slices = pyqtSignal(list)
+    export_vad_blocks = pyqtSignal(object)
     manual_cut_created = pyqtSignal(object, int)
     auto_toggled = pyqtSignal(object, bool)
     slice_length_changed = pyqtSignal(object, str)
@@ -812,6 +828,7 @@ class VadMethodRow(QFrame):
         self.control_panel.auto_toggled.connect(self._on_auto_toggled)
         self.control_panel.slice_length_changed.connect(self._on_slice_length_changed)
         self.control_panel.send_clicked.connect(self._on_send_slices)
+        self.control_panel.export_vad_clicked.connect(self._on_export_vad_blocks)
         self.track_widget.cut_created.connect(self._on_cut_created)
 
     def _on_send_slices(self):
@@ -822,6 +839,9 @@ class VadMethodRow(QFrame):
             self.control_panel.set_manual_checked(False)
             self.track_widget.set_blade_mode(False)
         self.send_slices.emit(slices)
+
+    def _on_export_vad_blocks(self):
+        self.export_vad_blocks.emit(self)
 
     def latest_cut_sec(self) -> float:
         if not self.track_widget.confirmed_cuts:
