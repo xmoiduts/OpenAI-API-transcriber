@@ -340,6 +340,7 @@ tasks:
         note: claimed higher quality than whisper-1, but may be tuned too aggresive
   vad:
     parallel_workers: 4
+    # Internal chunk size for long parallel VAD analysis; auto-slicer slice length is stored separately.
     slice_minutes: 2
     parallel_min_duration_seconds: 900
   sentence-builder:

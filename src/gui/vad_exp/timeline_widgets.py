@@ -8,6 +8,7 @@ from PyQt5.QtWidgets import (
     QFrame,
     QHBoxLayout,
     QLabel,
+    QButtonGroup,
     QGestureEvent,
     QPinchGesture,
     QPushButton,
@@ -29,6 +30,8 @@ METHOD_TRACK_HEIGHT = AUDIO_TRACK_HEIGHT + VAD_TRACK_HEIGHT
 CONTROL_PANEL_WIDTH = 220
 PROGRESS_BAR_HEIGHT = 8
 PROGRESS_BAR_MARGIN = 6
+SLICE_LENGTH_PRESETS = ("~10min", "<3min", "<1min", "<30s")
+SLICE_TOOL_DEFAULT_NOTE = "Hover a Slice Tool control for guidance.\n "
 
 
 @dataclass(frozen=True)
@@ -44,6 +47,23 @@ class VadMethodSpec:
     title: str
     accent_color: str
     description: str
+
+
+class NoteButton(QPushButton):
+    """Button that writes a short guide into its owning notebar on hover."""
+
+    def __init__(self, text: str, note: str, note_label: QLabel, parent=None):
+        super().__init__(text, parent)
+        self._note = note
+        self._note_label = note_label
+
+    def enterEvent(self, event):
+        self._note_label.setText(self._note)
+        super().enterEvent(event)
+
+    def leaveEvent(self, event):
+        self._note_label.setText(SLICE_TOOL_DEFAULT_NOTE)
+        super().leaveEvent(event)
 
 
 class PannableTrackWidget(QWidget):
@@ -191,6 +211,9 @@ class TimelineRulerWidget(PannableTrackWidget):
 class MethodTimelineTrackWidget(PannableTrackWidget):
     """Shared-viewport track: tiled audio strength plus overlay VAD blocks."""
 
+    cut_created = pyqtSignal(int)
+    cut_deleted = pyqtSignal(int)
+
     def __init__(
         self,
         controller: TimelineController,
@@ -268,9 +291,11 @@ class MethodTimelineTrackWidget(PannableTrackWidget):
             if event.modifiers() & Qt.ShiftModifier:
                 if snapped in self.confirmed_cuts:
                     self.confirmed_cuts.remove(snapped)
+                    self.cut_deleted.emit(snapped)
             else:
                 if snapped not in self.confirmed_cuts:
                     bisect.insort(self.confirmed_cuts, snapped)
+                    self.cut_created.emit(snapped)
             self.update()
             event.accept()
             return
@@ -307,9 +332,6 @@ class MethodTimelineTrackWidget(PannableTrackWidget):
         painter.end()
 
     def _draw_blade_overlay(self, painter: QPainter):
-        if not self.blade_mode_active:
-            return
-
         accent = QColor(self.method_spec.accent_color)
 
         for cut_sec in self.confirmed_cuts:
@@ -317,6 +339,9 @@ class MethodTimelineTrackWidget(PannableTrackWidget):
             if -2 <= x <= self.width() + 2:
                 painter.setPen(QPen(accent, 2))
                 painter.drawLine(int(x), 0, int(x), METHOD_TRACK_HEIGHT)
+
+        if not self.blade_mode_active:
+            return
 
         if not self._mouse_inside or self._hover_time_sec is None:
             return
@@ -536,15 +561,21 @@ class MethodTimelineTrackWidget(PannableTrackWidget):
 
 
 class MethodControlPanel(QFrame):
-    """Left-side placeholder control block for one VAD method."""
+    """Left-side control block for one VAD method and its Slice Tool."""
 
-    blade_toggled = pyqtSignal(bool)
+    manual_toggled = pyqtSignal(bool)
+    auto_toggled = pyqtSignal(bool)
     send_clicked = pyqtSignal()
+    slice_length_changed = pyqtSignal(str)
 
-    def __init__(self, method_spec: VadMethodSpec, parent=None):
+    def __init__(self, method_spec: VadMethodSpec, supports_auto_slice: bool = True, parent=None):
         super().__init__(parent)
+        self.method_spec = method_spec
+        self.supports_auto_slice = supports_auto_slice
+        self.active_slice_length = "~10min"
         self.setObjectName("vadControlPanel")
-        self.setFixedWidth(CONTROL_PANEL_WIDTH)
+        self.setMinimumWidth(CONTROL_PANEL_WIDTH)
+        self.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Expanding)
         layout = QVBoxLayout(self)
         layout.setContentsMargins(10, 10, 10, 10)
         layout.setSpacing(8)
@@ -557,48 +588,195 @@ class MethodControlPanel(QFrame):
         description.setWordWrap(True)
         layout.addWidget(description)
 
-        btn_row = QHBoxLayout()
-        btn_row.setSpacing(6)
+        self.slice_tool_button = QPushButton("Slice Tool")
+        self.slice_tool_button.setCheckable(True)
+        self.slice_tool_button.setMinimumHeight(30)
+        self.slice_tool_button.clicked.connect(self._set_tool_panel_visible)
+        layout.addWidget(self.slice_tool_button)
 
-        self.blade_button = QPushButton("\u2702")
-        self.blade_button.setCheckable(True)
-        self.blade_button.setToolTip("Toggle blade mode for manual slicing")
-        self.blade_button.setFixedSize(36, 28)
-        self.blade_button.setStyleSheet(
-            "QPushButton { font-size: 16px; }"
-            "QPushButton:checked { background-color: #D0E8FF; border: 1px solid #4A90D9; }"
+        self.tool_panel = QFrame()
+        self.tool_panel.setObjectName("sliceToolPanel")
+        panel_layout = QVBoxLayout(self.tool_panel)
+        panel_layout.setContentsMargins(8, 8, 8, 8)
+        panel_layout.setSpacing(6)
+
+        panel_title = QLabel(f"Slice Tool: {method_spec.title}")
+        panel_title.setWordWrap(True)
+        panel_layout.addWidget(panel_title)
+
+        self.note_label = QLabel(SLICE_TOOL_DEFAULT_NOTE)
+        self.note_label.setObjectName("sliceToolNote")
+        self.note_label.setWordWrap(True)
+        self.note_label.setMinimumHeight(self.note_label.fontMetrics().lineSpacing() * 2 + 8)
+        panel_layout.addWidget(self.note_label)
+
+        panel_layout.addWidget(QLabel("Slice length:"))
+        length_row = QHBoxLayout()
+        length_row.setSpacing(4)
+        self.length_group = QButtonGroup(self)
+        self.length_group.setExclusive(True)
+        self.length_buttons = {}
+        for preset in SLICE_LENGTH_PRESETS:
+            button = NoteButton(
+                preset,
+                "Propose the length of each slice. ~ is soft target; < is hard maximum.",
+                self.note_label,
+            )
+            button.setCheckable(True)
+            button.setMinimumWidth(48)
+            button.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
+            button.setStyleSheet(_slice_tool_button_stylesheet())
+            button.clicked.connect(lambda checked, value=preset: self._on_slice_length_clicked(value))
+            self.length_group.addButton(button)
+            self.length_buttons[preset] = button
+            length_row.addWidget(button)
+        self.length_buttons[self.active_slice_length].setChecked(True)
+        panel_layout.addLayout(length_row)
+
+        mode_row = QHBoxLayout()
+        mode_row.setSpacing(6)
+
+        self.manual_button = NoteButton(
+            "Manual Slice",
+            "Click the timeline to add a cut; Shift+click an existing cut to remove it.",
+            self.note_label,
         )
-        self.blade_button.clicked.connect(self._on_blade_toggled)
-        btn_row.addWidget(self.blade_button)
+        self.manual_button.setCheckable(True)
+        self.manual_button.setMinimumHeight(28)
+        self.manual_button.setStyleSheet(_slice_tool_button_stylesheet())
+        self.manual_button.clicked.connect(self._on_manual_toggled)
+        mode_row.addWidget(self.manual_button)
 
-        self.send_button = QPushButton("Send Slices")
-        self.send_button.setToolTip("Send confirmed cuts to Transcription tab")
-        self.send_button.setFixedHeight(28)
+        self.auto_button = NoteButton(
+            "Auto Slice",
+            "Start auto slicing from the latest cut point using VAD silence gaps. Click again to stop.",
+            self.note_label,
+        )
+        self.auto_button.setCheckable(True)
+        self.auto_button.setMinimumHeight(28)
+        self.auto_button.setEnabled(self.supports_auto_slice)
+        self.auto_button.setStyleSheet(_slice_tool_button_stylesheet())
+        self.auto_button.clicked.connect(self._on_auto_toggled)
+        mode_row.addWidget(self.auto_button)
+        panel_layout.addLayout(mode_row)
+
+        self.send_button = NoteButton(
+            "Send slices to transcribe tab",
+            "Approve these cut points and send the resulting slices to the Transcription tab.",
+            self.note_label,
+        )
+        self.send_button.setMinimumHeight(30)
+        self.send_button.setStyleSheet(_slice_tool_button_stylesheet())
         self.send_button.clicked.connect(self.send_clicked.emit)
-        btn_row.addWidget(self.send_button)
+        panel_layout.addWidget(self.send_button)
 
-        layout.addLayout(btn_row)
+        self.tool_panel.hide()
+        self.tool_panel.setMinimumWidth(320)
+        self.tool_panel.setStyleSheet(_slice_tool_panel_stylesheet())
 
-        for line in ("control block", "placeholder", "future: thresholds / zoom"):
-            label = QLabel(line)
-            label.setWordWrap(True)
-            layout.addWidget(label)
+        if not self.supports_auto_slice:
+            self.auto_button.setToolTip("Auto slicing is disabled until this VAD method has a real engine.")
 
         layout.addStretch()
 
-    def _on_blade_toggled(self, checked: bool):
-        self.blade_toggled.emit(checked)
+    def _set_tool_panel_visible(self, visible: bool):
+        if visible:
+            self._show_tool_panel()
+        else:
+            self.tool_panel.hide()
 
-    def set_blade_checked(self, checked: bool):
-        self.blade_button.blockSignals(True)
-        self.blade_button.setChecked(checked)
-        self.blade_button.blockSignals(False)
+    def _show_tool_panel(self):
+        container = self._floating_container()
+        if container is not None and self.tool_panel.parent() is not container:
+            self.tool_panel.setParent(container)
+        self.tool_panel.adjustSize()
+        global_pos = self.slice_tool_button.mapToGlobal(self.slice_tool_button.rect().bottomLeft())
+        if container is not None:
+            local_pos = container.mapFromGlobal(global_pos)
+            max_x = max(container.width() - self.tool_panel.width() - 8, 8)
+            local_pos.setX(max(8, min(local_pos.x(), max_x)))
+            local_pos.setY(max(8, min(local_pos.y(), max(container.height() - self.tool_panel.height() - 8, 8))))
+            self.tool_panel.move(local_pos)
+        self.tool_panel.show()
+        self.tool_panel.raise_()
+
+    def hide_tool_panel(self):
+        self.tool_panel.hide()
+        self.slice_tool_button.setChecked(False)
+
+    def _floating_container(self):
+        parent = self.parentWidget()
+        while parent is not None:
+            if parent.__class__.__name__ == "VADExpTab":
+                return parent
+            parent = parent.parentWidget()
+        return self.parentWidget()
+
+    def _on_slice_length_clicked(self, preset: str):
+        if preset == self.active_slice_length:
+            self.length_buttons[preset].setChecked(True)
+            return
+        self.active_slice_length = preset
+        self.slice_length_changed.emit(preset)
+
+    def set_slice_length_preset(self, preset: str):
+        if preset not in self.length_buttons:
+            return
+        self.active_slice_length = preset
+        self.length_buttons[preset].setChecked(True)
+
+    def _on_manual_toggled(self, checked: bool):
+        self._apply_manual_state(checked)
+        self.manual_toggled.emit(checked)
+
+    def _on_auto_toggled(self, checked: bool):
+        if not self.supports_auto_slice:
+            self.auto_button.setChecked(False)
+            return
+        self._apply_auto_state(checked)
+        self.auto_toggled.emit(checked)
+
+    def _apply_manual_state(self, active: bool):
+        self.auto_button.setEnabled(not active and self.supports_auto_slice)
+        self.send_button.setEnabled(not active)
+        for button in self.length_buttons.values():
+            button.setEnabled(not active)
+
+    def _apply_auto_state(self, active: bool):
+        self.manual_button.setEnabled(not active)
+        self.send_button.setEnabled(not active)
+        for button in self.length_buttons.values():
+            button.setEnabled(not active)
+
+    def set_manual_checked(self, checked: bool):
+        self.manual_button.blockSignals(True)
+        self.manual_button.setChecked(checked)
+        self.manual_button.blockSignals(False)
+        self._apply_manual_state(checked)
+
+    def set_auto_checked(self, checked: bool):
+        self.auto_button.blockSignals(True)
+        self.auto_button.setChecked(checked)
+        self.auto_button.blockSignals(False)
+        self._apply_auto_state(checked)
+
+    def set_idle_enabled(self, enabled: bool):
+        self.slice_tool_button.setEnabled(enabled)
+        if not self.manual_button.isChecked() and not self.auto_button.isChecked():
+            self.manual_button.setEnabled(enabled)
+            self.auto_button.setEnabled(enabled and self.supports_auto_slice)
+            self.send_button.setEnabled(enabled)
+            for button in self.length_buttons.values():
+                button.setEnabled(enabled)
 
 
 class VadMethodRow(QFrame):
     """Composite row with fixed control block and shared-viewport track."""
 
     send_slices = pyqtSignal(list)
+    manual_cut_created = pyqtSignal(object, int)
+    auto_toggled = pyqtSignal(object, bool)
+    slice_length_changed = pyqtSignal(object, str)
 
     def __init__(
         self,
@@ -616,7 +794,10 @@ class VadMethodRow(QFrame):
         layout.setContentsMargins(10, 10, 10, 10)
         layout.setSpacing(10)
 
-        self.control_panel = MethodControlPanel(method_spec)
+        self.control_panel = MethodControlPanel(
+            method_spec,
+            supports_auto_slice=method_spec.method_key == "silero",
+        )
         self.track_widget = MethodTimelineTrackWidget(
             controller=controller,
             tile_store=tile_store,
@@ -627,17 +808,53 @@ class VadMethodRow(QFrame):
         layout.addWidget(self.control_panel)
         layout.addWidget(self.track_widget, stretch=1)
 
-        self.control_panel.blade_toggled.connect(self.track_widget.set_blade_mode)
+        self.control_panel.manual_toggled.connect(self._on_manual_toggled)
+        self.control_panel.auto_toggled.connect(self._on_auto_toggled)
+        self.control_panel.slice_length_changed.connect(self._on_slice_length_changed)
         self.control_panel.send_clicked.connect(self._on_send_slices)
+        self.track_widget.cut_created.connect(self._on_cut_created)
 
     def _on_send_slices(self):
         slices = self.track_widget.get_slices(
             self.track_widget.controller.duration_sec,
         )
         if self.track_widget.blade_mode_active:
-            self.control_panel.set_blade_checked(False)
+            self.control_panel.set_manual_checked(False)
             self.track_widget.set_blade_mode(False)
         self.send_slices.emit(slices)
+
+    def latest_cut_sec(self) -> float:
+        if not self.track_widget.confirmed_cuts:
+            return 0.0
+        return float(max(self.track_widget.confirmed_cuts))
+
+    def add_confirmed_cut(self, cut_sec: float) -> int:
+        snapped = max(0, round(float(cut_sec)))
+        if snapped not in self.track_widget.confirmed_cuts:
+            bisect.insort(self.track_widget.confirmed_cuts, snapped)
+            self.track_widget.update()
+        return snapped
+
+    def set_auto_running(self, running: bool):
+        self.control_panel.set_auto_checked(running)
+
+    def set_slice_length_preset(self, preset: str):
+        self.control_panel.set_slice_length_preset(preset)
+
+    def hide_slice_tool_panel(self):
+        self.control_panel.hide_tool_panel()
+
+    def _on_manual_toggled(self, checked: bool):
+        self.track_widget.set_blade_mode(checked)
+
+    def _on_auto_toggled(self, checked: bool):
+        self.auto_toggled.emit(self, checked)
+
+    def _on_slice_length_changed(self, preset: str):
+        self.slice_length_changed.emit(self, preset)
+
+    def _on_cut_created(self, cut_sec: int):
+        self.manual_cut_created.emit(self, cut_sec)
 
 
 class VadTimelinePanel(QWidget):
@@ -705,6 +922,10 @@ class VadTimelinePanel(QWidget):
         self._active_ranges = []
 
         for row, method_spec in zip(self.method_rows, self.method_specs):
+            row.track_widget.confirmed_cuts = []
+            row.track_widget.set_blade_mode(False)
+            row.control_panel.set_manual_checked(False)
+            row.control_panel.set_auto_checked(False)
             if method_spec.method_key == "silero":
                 row.track_widget.set_vad_intervals([])
             else:
@@ -767,10 +988,18 @@ class VadTimelinePanel(QWidget):
         self._processed_ranges = []
         self._active_ranges = []
         for row in self.method_rows:
+            row.track_widget.confirmed_cuts = []
+            row.track_widget.set_blade_mode(False)
+            row.control_panel.set_manual_checked(False)
+            row.control_panel.set_auto_checked(False)
             row.track_widget.set_vad_intervals([])
             row.track_widget.set_processing_state([], [])
         self.tile_store.set_status_message("Waiting for media broadcast")
         self._update_all_tracks()
+
+    def hide_slice_tool_panels(self):
+        for row in self.method_rows:
+            row.hide_slice_tool_panel()
 
     def _sync_scrollbar_state(self, value: int, maximum: int, page_step: int):
         self.scrollbar.blockSignals(True)
@@ -803,6 +1032,36 @@ def _format_time_label(seconds: float) -> str:
     if hours > 0:
         return f"{hours:02d}:{minutes:02d}:{secs:02d}"
     return f"{minutes:02d}:{secs:02d}"
+
+
+def _slice_tool_button_stylesheet() -> str:
+    return """
+        QPushButton {
+            padding: 4px 8px;
+        }
+        QPushButton:checked {
+            background-color: #D0E8FF;
+            border: 1px solid #4A90D9;
+            border-radius: 3px;
+        }
+        QPushButton:disabled {
+            color: #999999;
+        }
+    """
+
+
+def _slice_tool_panel_stylesheet() -> str:
+    return """
+        QFrame#sliceToolPanel {
+            background-color: #ffffff;
+            border: 1px solid #cfcfcf;
+            border-radius: 4px;
+        }
+        QLabel#sliceToolNote {
+            color: #5f6f85;
+            font-size: 11px;
+        }
+    """
 
 
 def _build_placeholder_intervals(method_key: str, duration_sec: float) -> list[VadInterval]:

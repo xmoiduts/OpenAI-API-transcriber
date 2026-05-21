@@ -1,10 +1,15 @@
 from __future__ import annotations
 
+import math
 from typing import Callable, Optional
 
-from src.vad_exp.audio_strength_extractor import extract_audio_strength_series
+from src.vad_exp.audio_strength_extractor import (
+    extract_audio_strength_range_series,
+    extract_audio_strength_series,
+    strength_bin_count,
+)
 
-from .models import VadAnalysisOutput, VadAnalysisRequest
+from .models import AudioStrengthPatch, VadAnalysisOutput, VadAnalysisRequest, VadTimeRange
 from .ports import VadEnginePort
 from .store import InMemoryVadResultStore
 
@@ -37,18 +42,26 @@ class VadApplicationService:
         output = VadAnalysisOutput()
 
         if request.include_amplitude:
-            output.amplitude_series = extract_audio_strength_series(
-                media_path=request.media_path,
-                duration_sec=request.media_duration_sec,
-                points_per_second=request.amplitude_points_per_second,
-                sample_rate=request.amplitude_sample_rate,
-                should_stop=should_stop,
-            )
-            if output.amplitude_series is not None:
-                try:
-                    output.amplitude_peak = float(output.amplitude_series.max())
-                except Exception:
-                    output.amplitude_peak = None
+            if _is_full_media_range(request):
+                output.amplitude_series = extract_audio_strength_series(
+                    media_path=request.media_path,
+                    duration_sec=request.media_duration_sec,
+                    points_per_second=request.amplitude_points_per_second,
+                    sample_rate=request.amplitude_sample_rate,
+                    should_stop=should_stop,
+                )
+                if output.amplitude_series is not None:
+                    try:
+                        output.amplitude_peak = float(output.amplitude_series.max())
+                    except Exception:
+                        output.amplitude_peak = None
+            else:
+                output.amplitude_patch = _extract_strength_patch(request, should_stop)
+                if output.amplitude_patch is not None:
+                    try:
+                        output.amplitude_peak = float(output.amplitude_patch.values.max())
+                    except Exception:
+                        output.amplitude_peak = None
 
         if request.include_vad:
             engine = self._engines.get(request.engine_key)
@@ -82,3 +95,39 @@ def _build_status_message(request: VadAnalysisRequest) -> str:
     if request.include_amplitude:
         return "Amplitude ready"
     return f"{request.engine_key} VAD ready"
+
+
+def _is_full_media_range(request: VadAnalysisRequest) -> bool:
+    return (
+        request.time_range.start_sec <= 0.0
+        and request.time_range.end_sec >= request.media_duration_sec
+    )
+
+
+def _extract_strength_patch(request: VadAnalysisRequest, should_stop=None) -> AudioStrengthPatch | None:
+    points_per_second = request.amplitude_points_per_second
+    start_index = max(int(math.floor(request.time_range.start_sec * points_per_second)), 0)
+    total_bins = strength_bin_count(request.media_duration_sec, points_per_second)
+    end_index = min(int(math.ceil(request.time_range.end_sec * points_per_second)), total_bins)
+    if end_index <= start_index:
+        return None
+
+    aligned_range = VadTimeRange(
+        start_sec=start_index / points_per_second,
+        end_sec=min(end_index / points_per_second, request.media_duration_sec),
+    )
+    values = extract_audio_strength_range_series(
+        media_path=request.media_path,
+        time_range=aligned_range,
+        points_per_second=points_per_second,
+        sample_rate=request.amplitude_sample_rate,
+        should_stop=should_stop,
+        normalize=False,
+    )
+    if len(values) == 0:
+        return None
+    return AudioStrengthPatch(
+        time_range=aligned_range,
+        start_index=start_index,
+        values=values,
+    )

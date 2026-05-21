@@ -94,6 +94,10 @@ class TimelineController(QObject):
     def reset_view(self):
         self.set_offset_px(0)
 
+    def center_on_time(self, time_sec: float):
+        center_offset = int(round(float(time_sec) * self.pixels_per_second - self.viewport_width_px / 2))
+        self.set_offset_px(center_offset)
+
     def time_to_view_x(self, time_sec: float) -> float:
         return (float(time_sec) * self.pixels_per_second) - self.offset_px
 

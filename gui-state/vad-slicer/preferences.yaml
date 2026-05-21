@@ -1,0 +1,16 @@
+lookaround:
+  <1min:
+    after_seconds: 0
+    before_seconds: 30
+  <30s:
+    after_seconds: 0
+    before_seconds: 30
+  <3min:
+    after_seconds: 0
+    before_seconds: 60
+  ~10min:
+    after_seconds: 60
+    before_seconds: 60
+slice_length:
+  preset: ~10min
+version: 1

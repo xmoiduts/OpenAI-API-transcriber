@@ -121,6 +121,7 @@ class VadPartialAnalysisOutput:
 @dataclass
 class VadAnalysisOutput:
     amplitude_series: object | None = None
+    amplitude_patch: Optional[AudioStrengthPatch] = None
     amplitude_peak: float | None = None
     vad_result: Optional[VadAnalysisResult] = None
     analyzed_segments: list[SpeechSegment] = field(default_factory=list)

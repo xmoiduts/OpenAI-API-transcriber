@@ -2,18 +2,26 @@ from PyQt5.QtCore import Qt
 from PyQt5.QtWidgets import QLabel, QVBoxLayout, QFrame, QHBoxLayout, QPushButton
 
 from src.configuration_manager.configuration_manager import ConfigManager
+from src.gui.flying_message import show_countdown_message
+from src.vad.auto_slicer import (
+    build_probe_range,
+    choose_auto_cut_point,
+    get_slice_length_preset,
+)
 from src.vad.coordinator import ParallelVadConfig
 from src.vad.models import VadTimeRange
 from .tab_interface import TabInterface
 from .styles.style_manager import get_drop_zone_stylesheet, get_scrollbar_stylesheet
 from .util.add_zero_wide_char_to_str import add_zero_wide_char_to_str
 from .vad_exp.audio_parse_thread import AudioParseThread
+from .vad_exp.slicer_preferences import VadSlicerPreferences
 from .vad_exp.timeline_widgets import VadInterval, VadMethodSpec, VadTimelinePanel
 from src.vad.adapters import SileroVadEngine
 from src.vad.service import VadApplicationService
 
 
 APPROVAL_THRESHOLD_SEC = 10 * 60
+LONG_MEDIA_PREVIEW_SEC = 3 * 60
 SILERO_ENGINE_KEY = "silero"
 
 
@@ -29,9 +37,16 @@ class VADExpTab(TabInterface):
         self.current_file_path = ""
         self.current_duration = 0.0
         self.current_request_range = None
+        self.current_request_context = None
+        self.processed_ranges = []
         self.pending_approval = False
         self.parse_generation = 0
+        self.navigation_generation = 0
         self.parse_thread = None
+        self.active_auto_row = None
+        self.row_slice_presets = {}
+        self.slicer_preferences = VadSlicerPreferences()
+        self.default_slice_preset = self.slicer_preferences.load_slice_length_preset()
         self.vad_service = VadApplicationService([SileroVadEngine()])
         self.parallel_config = self._load_parallel_config()
         self.method_specs = [
@@ -99,12 +114,22 @@ class VADExpTab(TabInterface):
 
         for row in self.timeline_panel.method_rows:
             row.send_slices.connect(self._on_row_send_slices)
+            row.manual_cut_created.connect(self._on_row_manual_cut_created)
+            row.auto_toggled.connect(self._on_row_auto_toggled)
+            row.slice_length_changed.connect(self._on_row_slice_length_changed)
+            row.set_slice_length_preset(self.default_slice_preset)
+            self.row_slice_presets[row.method_spec.method_key] = self.default_slice_preset
 
         self.setStyleSheet(
             get_drop_zone_stylesheet() +
             get_scrollbar_stylesheet() +
             self._local_stylesheet()
         )
+
+    def hideEvent(self, event):
+        if hasattr(self, "timeline_panel"):
+            self.timeline_panel.hide_slice_tool_panels()
+        super().hideEvent(event)
 
     def update_from_other_tab(self, data):
         file_path = data.get("file_path")
@@ -114,7 +139,10 @@ class VADExpTab(TabInterface):
             self.current_file_path = ""
             self.current_duration = 0.0
             self.current_request_range = None
+            self.current_request_context = None
+            self.processed_ranges = []
             self.pending_approval = False
+            self.active_auto_row = None
             self.file_info_label.setText("Waiting for broadcast from Time Slicer")
             self.parse_status_label.setText("Waiting for media broadcast")
             self.approve_button.hide()
@@ -124,6 +152,9 @@ class VADExpTab(TabInterface):
         self.current_file_path = file_path
         self.current_duration = float(duration or 0.0)
         self.current_request_range = None
+        self.current_request_context = None
+        self.processed_ranges = []
+        self.active_auto_row = None
         display = add_zero_wide_char_to_str(file_path)
         self.file_info_label.setText(f"Loaded from Time Slicer: {display}")
         self.timeline_panel.reset_for_media(self.current_duration or 7200.0)
@@ -131,12 +162,20 @@ class VADExpTab(TabInterface):
         if self.current_duration > APPROVAL_THRESHOLD_SEC:
             self.pending_approval = True
             self.parse_status_label.setText(
-                "Long media detected (>10 min). Click Approve to start amplitude + Silero VAD analysis."
+                "Long media detected (>10 min). Previewing first 3 minutes strength. "
+                "Click Approve to start full amplitude + Silero VAD analysis."
             )
             self.approve_button.setEnabled(True)
             self.approve_button.show()
-            self.timeline_panel.set_audio_status_message("Awaiting approval for amplitude + Silero VAD")
             self._show_cached_vad_result()
+            self.request_analysis_range(
+                start_sec=0.0,
+                end_sec=min(LONG_MEDIA_PREVIEW_SEC, self.current_duration),
+                include_amplitude=True,
+                include_vad=False,
+                auto_started=True,
+                keep_approval_visible=True,
+            )
         else:
             self.pending_approval = False
             self.approve_button.hide()
@@ -169,23 +208,39 @@ class VADExpTab(TabInterface):
         include_amplitude: bool,
         include_vad: bool,
         auto_started: bool = False,
+        keep_approval_visible: bool = False,
+        request_context: dict | None = None,
     ):
         if not self.current_file_path:
+            return
+
+        if self.parse_thread and self.parse_thread.isRunning():
+            self._stop_parse_thread()
+
+        start_sec = max(float(start_sec), 0.0)
+        end_sec = min(float(end_sec), self.current_duration or 7200.0)
+        if end_sec <= start_sec:
             return
 
         self.parse_generation += 1
         generation = self.parse_generation
         self.current_request_range = VadTimeRange(start_sec, end_sec)
+        self.current_request_context = dict(request_context or {})
+        self.current_request_context["generation"] = generation
 
         request_label = self._describe_request(include_amplitude, include_vad)
         self.timeline_panel.set_audio_status_message(f"Running {request_label} analysis...")
-        self.timeline_panel.set_processing_state(processed_ranges=[], active_ranges=[])
+        self.timeline_panel.set_processing_state(
+            processed_ranges=self.processed_ranges,
+            active_ranges=[self.current_request_range],
+        )
         if auto_started:
-            self.parse_status_label.setText(f"Short media detected. Running {request_label} automatically...")
+            self.parse_status_label.setText(f"Running {request_label} automatically...")
         else:
             self.parse_status_label.setText(f"Approval received. Running {request_label}...")
 
-        self.approve_button.hide()
+        if not keep_approval_visible:
+            self.approve_button.hide()
 
         self.parse_thread = AudioParseThread(
             generation=generation,
@@ -207,6 +262,7 @@ class VADExpTab(TabInterface):
         self.parse_thread.cancelled.connect(self._on_parse_cancelled)
         self.parse_thread.finished.connect(self.parse_thread.deleteLater)
         self.parse_thread.start()
+        return generation
 
     def _on_partial_update(self, generation: int, analysis_output):
         if generation != self.parse_generation:
@@ -226,8 +282,9 @@ class VADExpTab(TabInterface):
                 self._build_vad_intervals(analysis_output.vad_result.speech_segments),
             )
 
+        processed_ranges = _merge_time_ranges([*self.processed_ranges, *analysis_output.processed_ranges])
         self.timeline_panel.set_processing_state(
-            processed_ranges=analysis_output.processed_ranges,
+            processed_ranges=processed_ranges,
             active_ranges=analysis_output.active_ranges,
         )
         if analysis_output.status_message:
@@ -242,6 +299,11 @@ class VADExpTab(TabInterface):
                 analysis_output.amplitude_series,
                 peak_value=analysis_output.amplitude_peak,
             )
+        elif analysis_output.amplitude_patch is not None:
+            self.timeline_panel.apply_audio_strength_patch(
+                analysis_output.amplitude_patch,
+                peak_value=analysis_output.amplitude_peak,
+            )
 
         if analysis_output.vad_result is not None:
             self.timeline_panel.set_method_vad_intervals(
@@ -250,8 +312,9 @@ class VADExpTab(TabInterface):
             )
 
         if self.current_request_range is not None:
+            self.processed_ranges = _merge_time_ranges([*self.processed_ranges, self.current_request_range])
             self.timeline_panel.set_processing_state(
-                processed_ranges=[self.current_request_range],
+                processed_ranges=self.processed_ranges,
                 active_ranges=[],
             )
         else:
@@ -260,6 +323,8 @@ class VADExpTab(TabInterface):
         strength_count = 0
         if analysis_output.amplitude_series is not None:
             strength_count = len(analysis_output.amplitude_series)
+        elif analysis_output.amplitude_patch is not None:
+            strength_count = len(analysis_output.amplitude_patch.values)
 
         segment_count = 0
         if analysis_output.vad_result is not None:
@@ -268,7 +333,13 @@ class VADExpTab(TabInterface):
         self.parse_status_label.setText(
             f"{analysis_output.status_message}: {strength_count} strength samples, {segment_count} speech segments"
         )
+        if self.pending_approval and self.current_file_path:
+            self.approve_button.setEnabled(True)
+            self.approve_button.show()
         self.parse_thread = None
+        request_context = self.current_request_context
+        self.current_request_context = None
+        self._handle_slice_probe_success(request_context, analysis_output)
 
     def _on_parse_failed(self, generation: int, error_message: str):
         if generation != self.parse_generation:
@@ -281,6 +352,8 @@ class VADExpTab(TabInterface):
             self.pending_approval = True
             self.approve_button.setEnabled(True)
             self.approve_button.show()
+        self._finish_auto_slicing()
+        self.current_request_context = None
         self.parse_thread = None
 
     def _on_parse_cancelled(self, generation: int):
@@ -293,6 +366,8 @@ class VADExpTab(TabInterface):
         if self.pending_approval and self.current_file_path:
             self.approve_button.setEnabled(True)
             self.approve_button.show()
+        self._finish_auto_slicing()
+        self.current_request_context = None
         self.parse_thread = None
 
     def _stop_parse_thread(self):
@@ -301,6 +376,112 @@ class VADExpTab(TabInterface):
             self.parse_thread.stop()
             self.parse_thread.wait(1000)
         self.parse_thread = None
+
+    def _on_row_slice_length_changed(self, row, preset_label: str):
+        self.row_slice_presets[row.method_spec.method_key] = preset_label
+        self.slicer_preferences.save_slice_length_preset(preset_label)
+
+    def _on_row_manual_cut_created(self, row, cut_sec: int):
+        self._schedule_countdown_jump(float(cut_sec))
+        if row.method_spec.method_key == SILERO_ENGINE_KEY:
+            self._request_slice_probe(row, float(cut_sec), auto_continue=False)
+
+    def _on_row_auto_toggled(self, row, checked: bool):
+        if checked:
+            if self.active_auto_row is not None and self.active_auto_row is not row:
+                self.active_auto_row.set_auto_running(False)
+            self.active_auto_row = row
+            self._request_slice_probe(row, row.latest_cut_sec(), auto_continue=True)
+            return
+        if self.active_auto_row is row:
+            self._finish_auto_slicing(stop_thread=True)
+
+    def _request_slice_probe(self, row, base_sec: float, auto_continue: bool):
+        if not self.current_file_path or row.method_spec.method_key != SILERO_ENGINE_KEY:
+            if auto_continue:
+                row.set_auto_running(False)
+            return
+
+        preset_label = self.row_slice_presets.get(row.method_spec.method_key, "~10min")
+        preset = get_slice_length_preset(preset_label)
+        probe_range = build_probe_range(base_sec, self.current_duration or 1.0, preset)
+        self.request_analysis_range(
+            start_sec=probe_range.start_sec,
+            end_sec=probe_range.end_sec,
+            include_amplitude=True,
+            include_vad=True,
+            auto_started=True,
+            keep_approval_visible=self.pending_approval,
+            request_context={
+                "purpose": "slice_probe",
+                "row": row,
+                "base_sec": float(base_sec),
+                "preset_label": preset_label,
+                "auto_continue": bool(auto_continue),
+            },
+        )
+
+    def _handle_slice_probe_success(self, request_context: dict | None, analysis_output):
+        if not request_context or request_context.get("purpose") != "slice_probe":
+            return
+        if request_context.get("generation") != self.parse_generation:
+            return
+
+        row = request_context.get("row")
+        if row is None:
+            return
+
+        preset = get_slice_length_preset(request_context.get("preset_label", "~10min"))
+        speech_segments = []
+        if analysis_output.vad_result is not None:
+            speech_segments = analysis_output.vad_result.speech_segments
+
+        cut_sec = choose_auto_cut_point(
+            base_sec=request_context.get("base_sec", 0.0),
+            duration_sec=self.current_duration or 1.0,
+            preset=preset,
+            speech_segments=speech_segments,
+            strength_patch=analysis_output.amplitude_patch,
+        )
+        snapped_cut = row.add_confirmed_cut(cut_sec)
+        self.timeline_panel.controller.center_on_time(float(snapped_cut))
+
+        if not request_context.get("auto_continue"):
+            return
+
+        if self.active_auto_row is not row:
+            return
+        if float(snapped_cut) >= (self.current_duration or 0.0) - 1.0:
+            self._finish_auto_slicing()
+            return
+        if float(snapped_cut) <= float(request_context.get("base_sec", 0.0)) + 1.0:
+            self._finish_auto_slicing()
+            return
+
+        self._schedule_countdown_jump(
+            float(snapped_cut),
+            on_finished=lambda: self._request_slice_probe(row, float(snapped_cut), auto_continue=True),
+        )
+
+    def _schedule_countdown_jump(self, time_sec: float, on_finished=None):
+        self.navigation_generation += 1
+        generation = self.navigation_generation
+
+        def finish():
+            if generation != self.navigation_generation:
+                return
+            self.timeline_panel.controller.center_on_time(float(time_sec))
+            if on_finished is not None:
+                on_finished()
+
+        show_countdown_message(self, 3, on_finished=finish, anchor="upper-middle")
+
+    def _finish_auto_slicing(self, stop_thread: bool = False):
+        if stop_thread:
+            self._stop_parse_thread()
+        if self.active_auto_row is not None:
+            self.active_auto_row.set_auto_running(False)
+        self.active_auto_row = None
 
     def _show_cached_vad_result(self):
         cached = self.vad_service.get_cached_result(self.current_file_path, SILERO_ENGINE_KEY)
@@ -375,6 +556,15 @@ class VADExpTab(TabInterface):
                 border: 1px solid #e2e2e2;
                 border-radius: 4px;
             }
+            QFrame#sliceToolPanel {
+                background-color: #ffffff;
+                border: 1px solid #dddddd;
+                border-radius: 4px;
+            }
+            QLabel#sliceToolNote {
+                color: #5f6f85;
+                font-size: 11px;
+            }
             QLabel#vadMethodTitle {
                 font-size: 15px;
                 font-weight: bold;
@@ -384,3 +574,21 @@ class VADExpTab(TabInterface):
                 border: 1px solid #e0e0e0;
             }
         """
+
+
+def _merge_time_ranges(ranges: list[VadTimeRange]) -> list[VadTimeRange]:
+    if not ranges:
+        return []
+
+    sorted_ranges = sorted(ranges, key=lambda item: (item.start_sec, item.end_sec))
+    merged = [sorted_ranges[0]]
+    for current in sorted_ranges[1:]:
+        previous = merged[-1]
+        if previous.overlaps(current) or previous.touches(current):
+            merged[-1] = VadTimeRange(
+                start_sec=min(previous.start_sec, current.start_sec),
+                end_sec=max(previous.end_sec, current.end_sec),
+            )
+            continue
+        merged.append(current)
+    return merged
