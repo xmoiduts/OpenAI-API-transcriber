@@ -2,24 +2,20 @@
 Task Popup Window - Window for displaying LLM task execution progress and results.
 
 Features:
-- Header with task name
-- Collapsible context section
-- Real-time console log display
-- Response area
-- Close button
+- Embeddable TaskExecutionPanel (shared by single-task popup and assemble group)
+- Painted per-line length gutter aligned to QTextBlock geometry
+- Concurrent-safe LLMWorker (no process-wide stdout/stderr redirect)
 """
 
 from PyQt5.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
-    QTextBrowser, QPlainTextEdit, QFrame, QSizePolicy, QWidget,
-    QScrollArea, QApplication, QSplitter
+    QTextBrowser, QPlainTextEdit, QWidget, QApplication,
 )
-from PyQt5.QtCore import Qt, pyqtSignal, QThread, QTimer
-from PyQt5.QtGui import QFont, QTextCursor
-from typing import Optional, Callable
+from PyQt5.QtCore import Qt, pyqtSignal, QThread
+from PyQt5.QtGui import QFont, QTextCursor, QPainter, QColor, QFontMetrics
+from typing import Optional
 import sys
 from pathlib import Path
-from contextlib import contextmanager
 
 # Add src to path for imports
 src_path = Path(__file__).parent.parent.parent
@@ -31,16 +27,15 @@ from chatbot_core import ChatCore
 
 class CollapsibleSection(QWidget):
     """A collapsible widget section."""
-    
+
     def __init__(self, title: str, parent: Optional[QWidget] = None):
         super().__init__(parent)
         self._is_collapsed = True
-        
+
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
-        
-        # Header button
+
         self.toggle_btn = QPushButton(f"▶ {title}")
         self.toggle_btn.setObjectName("collapsibleHeader")
         self.toggle_btn.setStyleSheet("""
@@ -59,40 +54,85 @@ class CollapsibleSection(QWidget):
         """)
         self.toggle_btn.clicked.connect(self._toggle)
         layout.addWidget(self.toggle_btn)
-        
-        # Content area
+
         self.content = QWidget()
         self.content_layout = QVBoxLayout(self.content)
         self.content_layout.setContentsMargins(8, 8, 8, 8)
         self.content.hide()
         layout.addWidget(self.content)
-        
+
         self._title = title
-    
+
     def _toggle(self):
-        """Toggle collapsed state."""
         self._is_collapsed = not self._is_collapsed
         self.content.setVisible(not self._is_collapsed)
         arrow = "▶" if self._is_collapsed else "▼"
         self.toggle_btn.setText(f"{arrow} {self._title}")
-    
+
     def add_widget(self, widget: QWidget):
-        """Add a widget to the content area."""
         self.content_layout.addWidget(widget)
-    
+
     def set_expanded(self, expanded: bool):
-        """Set the expanded state."""
         if expanded != (not self._is_collapsed):
             self._toggle()
 
 
-class ResponseWithLengthPanel(QWidget):
-    """Side-by-side panel: left = response text, right = per-line length gutter.
+class LengthGutter(QWidget):
+    """Painted length gutter aligned to a QPlainTextEdit's block geometry."""
 
-    The right gutter is kept in sync with the left editor's word-wrapped
-    layout so that each logical line's length value aligns with the first
-    visual row of that line in the left editor.
-    """
+    GUTTER_WIDTH = 52
+
+    def __init__(self, editor: QPlainTextEdit, parent: Optional[QWidget] = None):
+        super().__init__(parent)
+        from util.text_metrics import calc_length, extract_body_text
+        self._calc_length = calc_length
+        self._extract_body = extract_body_text
+        self._editor = editor
+        self.setFixedWidth(self.GUTTER_WIDTH)
+        self.setAttribute(Qt.WA_TransparentForMouseEvents, False)
+
+        editor.verticalScrollBar().valueChanged.connect(self.update)
+        editor.document().documentLayout().documentSizeChanged.connect(self.update)
+        editor.cursorPositionChanged.connect(self.update)
+        editor.textChanged.connect(self.update)
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.fillRect(event.rect(), QColor("#f8f8f8"))
+        painter.setPen(QColor("#e0e0e0"))
+        painter.drawLine(0, 0, 0, self.height())
+
+        font = self._editor.font()
+        painter.setFont(font)
+        painter.setPen(QColor("#999999"))
+        metrics = QFontMetrics(font)
+        line_h = metrics.lineSpacing()
+
+        block = self._editor.document().begin()
+        offset = self._editor.contentOffset()
+        viewport_h = self._editor.viewport().height()
+
+        while block.isValid():
+            geom = self._editor.blockBoundingGeometry(block).translated(offset)
+            y = int(geom.top())
+            if y > viewport_h:
+                break
+            if y + int(geom.height()) >= 0 and block.isVisible():
+                body = self._extract_body(block.text())
+                length = self._calc_length(body)
+                painter.drawText(
+                    0,
+                    y,
+                    self.width() - 4,
+                    line_h,
+                    Qt.AlignRight | Qt.AlignVCenter,
+                    f"{length:g}",
+                )
+            block = block.next()
+
+
+class ResponseWithLengthPanel(QWidget):
+    """Response editor with a painted per-line length gutter."""
 
     MONO_FONT = "Consolas, Monaco, 'Courier New', monospace"
     FONT_SIZE_PX = 11
@@ -103,27 +143,16 @@ class ResponseWithLengthPanel(QWidget):
         self._calc_length = calc_length
         self._extract_body = extract_body_text
 
-        self._syncing_scroll = False
-
         layout = QHBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
 
-        # Left: response editor (read-only, word-wrap on)
         self.response_display = QPlainTextEdit()
         self.response_display.setObjectName("responseDisplay")
         self.response_display.setReadOnly(True)
         self.response_display.setLineWrapMode(QPlainTextEdit.WidgetWidth)
         self.response_display.setMinimumHeight(150)
-
-        # Right: length gutter (read-only, no wrap, narrow)
-        self.length_display = QPlainTextEdit()
-        self.length_display.setObjectName("lengthGutter")
-        self.length_display.setReadOnly(True)
-        self.length_display.setLineWrapMode(QPlainTextEdit.NoWrap)
-        self.length_display.setFixedWidth(52)
-        self.length_display.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-        self.length_display.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.response_display.setFont(QFont("Consolas", 11))
 
         shared_font_css = (
             f"font-family: {self.MONO_FONT}; font-size: {self.FONT_SIZE_PX}px;"
@@ -137,32 +166,24 @@ class ResponseWithLengthPanel(QWidget):
         self.response_display.setStyleSheet(
             f"QPlainTextEdit#responseDisplay {{ {base_style} }}"
         )
-        gutter_style = (
-            "background-color: #f8f8f8; color: #999999; "
-            "border: 1px solid #e0e0e0; border-radius: 0px; padding: 8px 4px; "
-            + shared_font_css
-        )
-        self.length_display.setStyleSheet(
-            f"QPlainTextEdit#lengthGutter {{ {gutter_style} }}"
+
+        self.length_gutter = LengthGutter(self.response_display)
+        self.length_gutter.setStyleSheet(
+            "background-color: #f8f8f8; border: 1px solid #e0e0e0; border-left: none;"
         )
 
         layout.addWidget(self.response_display, 1)
-        layout.addWidget(self.length_display, 0)
+        layout.addWidget(self.length_gutter, 0)
 
-        # Scroll sync: left -> right
+        # Keep gutter height in sync with editor viewport
         self.response_display.verticalScrollBar().valueChanged.connect(
-            self._sync_scroll_to_gutter
+            self.length_gutter.update
         )
-
-        # Re-sync gutter when content layout changes (e.g. word-wrap)
         self.response_display.document().documentLayout().documentSizeChanged.connect(
-            self._rebuild_gutter
+            self.length_gutter.update
         )
-
-    # ---- public helpers used by TaskPopupWindow ----
 
     def append_chunk(self, chunk: str):
-        """Append streaming text and keep auto-scroll."""
         cursor = self.response_display.textCursor()
         cursor.movePosition(QTextCursor.End)
         cursor.insertText(chunk)
@@ -170,19 +191,16 @@ class ResponseWithLengthPanel(QWidget):
         self.response_display.verticalScrollBar().setValue(
             self.response_display.verticalScrollBar().maximum()
         )
-        if "\n" in chunk:
-            self._rebuild_gutter()
-        else:
-            self._update_last_gutter_line()
+        self.length_gutter.update()
 
     def get_plain_text(self) -> str:
         return self.response_display.toPlainText()
 
     def set_plain_text(self, text: str):
         self.response_display.setPlainText(text)
+        self.length_gutter.update()
 
     def get_line_lengths(self) -> list:
-        """Return list of (line_index, body_length) for all logical lines."""
         result = []
         text = self.response_display.toPlainText()
         for idx, raw_line in enumerate(text.split("\n")):
@@ -190,178 +208,113 @@ class ResponseWithLengthPanel(QWidget):
             result.append((idx, self._calc_length(body)))
         return result
 
-    # ---- private ----
-
-    def _sync_scroll_to_gutter(self, value: int):
-        if self._syncing_scroll:
-            return
-        self._syncing_scroll = True
-        self.length_display.verticalScrollBar().setValue(value)
-        self._syncing_scroll = False
-
-    def _rebuild_gutter(self):
-        """Rebuild the right gutter so each length label aligns with its block."""
-        doc = self.response_display.document()
-        lines: list[str] = []
-        block = doc.begin()
-        while block.isValid():
-            text = block.text()
-            body = self._extract_body(text)
-            length = self._calc_length(body)
-            lines.append(f"{length:g}")
-            visual = block.layout().lineCount() if block.layout() else 1
-            for _ in range(max(0, visual - 1)):
-                lines.append("")
-            block = block.next()
-
-        old = self.length_display.toPlainText()
-        new_text = "\n".join(lines)
-        if old != new_text:
-            self.length_display.setPlainText(new_text)
-            self._sync_scroll_to_gutter(
-                self.response_display.verticalScrollBar().value()
-            )
-
-    def _update_last_gutter_line(self):
-        """Fast-path: only recompute the very last line in the gutter."""
-        text = self.response_display.toPlainText()
-        if not text:
-            return
-        last_line = text.rsplit("\n", 1)[-1]
-        body = self._extract_body(last_line)
-        length = self._calc_length(body)
-        length_str = f"{length:g}"
-
-        gutter_text = self.length_display.toPlainText()
-        gutter_lines = gutter_text.split("\n") if gutter_text else []
-        if gutter_lines:
-            gutter_lines[-1] = length_str
-        else:
-            gutter_lines = [length_str]
-        new_text = "\n".join(gutter_lines)
-        if gutter_text != new_text:
-            self.length_display.setPlainText(new_text)
-            self._sync_scroll_to_gutter(
-                self.response_display.verticalScrollBar().value()
-            )
-
 
 class LLMWorker(QThread):
-    """Worker thread for LLM operations."""
-    
+    """Worker thread for LLM operations.
+
+    Does NOT redirect process-wide stdout/stderr (unsafe under concurrency).
+    Provider errors are reported via ChatCore on_error callback + exceptions.
+    """
+
     chunk_received = pyqtSignal(str)
     response_complete = pyqtSignal(str)
     error_occurred = pyqtSignal(str)
     log_message = pyqtSignal(str)
-    
-    def __init__(self, chat_core: ChatCore, prompt: str, thinking_level: Optional[str] = None, task_key: Optional[str] = None):
+
+    def __init__(
+        self,
+        chat_core: ChatCore,
+        prompt: str,
+        thinking_level: Optional[str] = None,
+        task_key: Optional[str] = None,
+    ):
         super().__init__()
         self.chat_core = chat_core
         self.prompt = prompt
         self.thinking_level = thinking_level
         self.task_key = task_key
         self._stop_requested = False
+        self._error_message: Optional[str] = None
 
-    class _SignalWriter:
-        """
-        File-like object to capture prints from providers and forward them
-        into the popup's console log via a Qt signal.
-        """
-
-        def __init__(self, emit_line):
-            self._emit_line = emit_line
-            self._buf = ""
-
-        def write(self, s):
-            if not s:
-                return 0
-            self._buf += str(s)
-            while "\n" in self._buf:
-                line, self._buf = self._buf.split("\n", 1)
-                line = line.rstrip("\r")
-                if line.strip():
-                    self._emit_line(line)
-            return len(s)
-
-        def flush(self):
-            if self._buf.strip():
-                self._emit_line(self._buf.rstrip("\r\n"))
-            self._buf = ""
-
-    @contextmanager
-    def _capture_console(self):
-        """
-        Capture stdout/stderr during the request so provider-side print logs
-        (e.g. OpenAIProvider Stream error) appear in the GUI popup log.
-        """
-        old_out, old_err = sys.stdout, sys.stderr
-        writer = self._SignalWriter(lambda line: self.log_message.emit(line))
+    def run(self):
         try:
-            sys.stdout = writer
-            sys.stderr = writer
-            yield
-        finally:
+            self.log_message.emit("Starting LLM request...")
+            full_response = ""
+            self._error_message = None
+
+            # Capture ChatCore/provider errors without stdout hijacking.
+            def _on_error(exc: Exception):
+                self._error_message = str(exc)
+                self.log_message.emit(f"[ChatCore] {exc}")
+
             try:
-                writer.flush()
+                self.chat_core.set_callbacks(on_error=_on_error)
             except Exception:
                 pass
-            sys.stdout, sys.stderr = old_out, old_err
-    
-    def run(self):
-        """Execute LLM request."""
-        try:
-            with self._capture_console():
-                self.log_message.emit("Starting LLM request...")
-                full_response = ""
 
-                gen = self.chat_core.send_stream(
-                    self.prompt,
-                    thinking_level=self.thinking_level,
-                    task_key=self.task_key,
-                )
+            gen = self.chat_core.send_stream(
+                self.prompt,
+                thinking_level=self.thinking_level,
+                task_key=self.task_key,
+            )
 
-                try:
-                    while not self._stop_requested:
-                        chunk = next(gen)
-                        full_response += chunk
-                        self.chunk_received.emit(chunk)
-                except StopIteration as e:
-                    if e.value:
-                        full_response = e.value
+            try:
+                while not self._stop_requested:
+                    chunk = next(gen)
+                    full_response += chunk
+                    self.chunk_received.emit(chunk)
+            except StopIteration as e:
+                if e.value:
+                    full_response = e.value
 
-                if not self._stop_requested:
-                    self.log_message.emit("Response complete.")
-                    self.response_complete.emit(full_response)
+            if self._stop_requested:
+                return
+
+            if self._error_message and not full_response:
+                self.error_occurred.emit(self._error_message)
+                return
+
+            if self._error_message and full_response:
+                # Partial output kept; still report as error completion upstream.
+                self.log_message.emit(f"Stream ended with error: {self._error_message}")
+                self.error_occurred.emit(self._error_message)
+                return
+
+            self.log_message.emit("Response complete.")
+            self.response_complete.emit(full_response)
 
         except Exception as e:
-            # Keep both provider print logs (captured) + the exception itself.
             self.error_occurred.emit(str(e))
-    
+        finally:
+            try:
+                self.chat_core.set_callbacks(
+                    on_response_start=None,
+                    on_response_chunk=None,
+                    on_response_complete=None,
+                    on_error=None,
+                )
+            except Exception:
+                pass
+
     def request_stop(self):
-        """Request the worker to stop."""
         self._stop_requested = True
 
 
-class TaskPopupWindow(QDialog):
-    """Popup window for task execution display.
-    
-    Shows:
-    - Task header with optional line range info
-    - Collapsible context section
-    - Console log display
-    - LLM response display
-    - Optional converted output (for merge overlaps task)
+class TaskExecutionPanel(QWidget):
+    """Embeddable task execution UI (context / log / response / controls).
+
+    Used both inside TaskPopupWindow and AssembleTaskGroupWindow cards.
     """
-    
+
     task_completed = pyqtSignal(bool, str)  # success, response
-    gate_approved = pyqtSignal()  # Emitted when gate button is clicked
-    stream_activity = pyqtSignal(str)  # Emitted on streaming/log activity
-    
-    auto_quenched = pyqtSignal()  # Emitted when auto-quench stops streaming
+    gate_approved = pyqtSignal()
+    stream_activity = pyqtSignal(str)
+    auto_quenched = pyqtSignal()
+    stopped = pyqtSignal()  # user/auto stop without completion
 
     def __init__(
         self,
-        task_name: str,
+        task_name: str = "Task",
         line_range: Optional[tuple] = None,
         parent: Optional[QWidget] = None,
         needs_approval: bool = False,
@@ -369,6 +322,9 @@ class TaskPopupWindow(QDialog):
         enable_line_metrics: bool = False,
         max_line_length: float = 50.0,
         max_over_limit_pct: float = 12.5,
+        show_close_button: bool = True,
+        copy_button_label: str = "Copy Output",
+        compact_header: bool = False,
     ):
         super().__init__(parent)
         self.task_name = task_name
@@ -378,56 +334,52 @@ class TaskPopupWindow(QDialog):
         self.enable_line_metrics = enable_line_metrics
         self._max_line_length = max_line_length
         self._max_over_limit_pct = max_over_limit_pct
+        self._show_close_button = show_close_button
+        self._copy_button_label = copy_button_label
+        self._compact_header = compact_header
 
         self.chat_core: Optional[ChatCore] = None
         self._worker: Optional[LLMWorker] = None
         self._response_text = ""
         self._thinking_level: Optional[str] = None
         self._task_key: Optional[str] = None
-        self._is_approved = not needs_approval  # Auto-approve if not needed
+        self._is_approved = not needs_approval
         self._pending_prompt = None
         self._pending_thinking_level = None
         self._pending_task_key = None
 
-        # For merge overlaps: line number mapping and conversion
-        self._line_mappings: Optional[dict] = None  # offset -> {line_num -> (start, end, word)}
-        self._conversion_buffer = ""  # Buffer for incremental conversion
-        self._converted_text = ""  # Accumulated converted output
-        self._current_offset = 0  # Track current Time offset during streaming
+        self._line_mappings: Optional[dict] = None
+        self._conversion_buffer = ""
+        self._converted_text = ""
+        self._current_offset = 0
 
-        # Line-metrics panel (only created when enable_line_metrics is True)
         self._response_panel: Optional[ResponseWithLengthPanel] = None
+        self._status = "idle"  # idle|waiting|running|success|error|interrupted
 
-        title = f"Task: {task_name}"
-        if slice_info:
-            title += f" - {slice_info}"
-        self.setWindowTitle(title)
-        self.setMinimumSize(600, 500)
-        self.setModal(False)  # Allow multiple windows
+        self._init_ui()
+        self._apply_styles()
 
-        self.init_ui()
-        self.apply_styles()
-    
-    def init_ui(self):
-        """Initialize the UI."""
+    # ------------------------------------------------------------------ UI
+
+    def _init_ui(self):
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(16, 16, 16, 16)
-        layout.setSpacing(12)
+        layout.setContentsMargins(8 if self._compact_header else 16, 8, 8, 8)
+        layout.setSpacing(8)
 
-        # Header
         header_text = self.task_name
         if self.line_range:
             header_text += f" (lines {self.line_range[0]}-{self.line_range[1]})"
+        if self.slice_info:
+            header_text += f" — {self.slice_info}"
 
-        header = QLabel(header_text)
-        header.setObjectName("popupHeader")
+        self.header_label = QLabel(header_text)
+        self.header_label.setObjectName("popupHeader")
         header_font = QFont()
-        header_font.setPointSize(14)
+        header_font.setPointSize(11 if self._compact_header else 14)
         header_font.setBold(True)
-        header.setFont(header_font)
-        layout.addWidget(header)
+        self.header_label.setFont(header_font)
+        layout.addWidget(self.header_label)
 
-        # -- Context section (collapsible) with input char count header --
         self.context_section = CollapsibleSection("Context Sent to LLM")
 
         ctx_header_layout = QHBoxLayout()
@@ -445,34 +397,29 @@ class TaskPopupWindow(QDialog):
 
         self.context_display = QTextBrowser()
         self.context_display.setObjectName("contextDisplay")
-        self.context_display.setMinimumHeight(100)
-        self.context_display.setMaximumHeight(200)
+        self.context_display.setMinimumHeight(60)
+        self.context_display.setMaximumHeight(160)
         self.context_section.add_widget(self.context_display)
-
         layout.addWidget(self.context_section)
 
-        # -- Console log section --
         log_label = QLabel("Console Log:")
         log_label.setStyleSheet("font-weight: bold; color: #555555;")
         layout.addWidget(log_label)
 
         self.log_display = QTextBrowser()
         self.log_display.setObjectName("logDisplay")
-        self.log_display.setMinimumHeight(150)
+        self.log_display.setMinimumHeight(80)
+        self.log_display.setMaximumHeight(140)
         layout.addWidget(self.log_display)
 
-        # -- Response section with character count --
         response_header_layout = QHBoxLayout()
         response_label = QLabel("LLM Response:")
         response_label.setStyleSheet("font-weight: bold; color: #555555;")
         response_header_layout.addWidget(response_label)
-
         response_header_layout.addStretch()
-
         self.output_char_count_label = QLabel("Output: 0 chars")
         self.output_char_count_label.setStyleSheet("color: #888888; font-size: 11px;")
         response_header_layout.addWidget(self.output_char_count_label)
-
         layout.addLayout(response_header_layout)
 
         if self.enable_line_metrics:
@@ -482,10 +429,9 @@ class TaskPopupWindow(QDialog):
         else:
             self.response_display = QTextBrowser()
             self.response_display.setObjectName("responseDisplay")
-            self.response_display.setMinimumHeight(150)
+            self.response_display.setMinimumHeight(120)
             layout.addWidget(self.response_display, 1)
 
-        # Converted output section (initially hidden, shown during streaming if enabled)
         self.converted_label = QLabel("Converted Output (Timestamps Restored):")
         self.converted_label.setStyleSheet("font-weight: bold; color: #555555;")
         self.converted_label.setVisible(False)
@@ -493,11 +439,10 @@ class TaskPopupWindow(QDialog):
 
         self.converted_display = QTextBrowser()
         self.converted_display.setObjectName("convertedDisplay")
-        self.converted_display.setMinimumHeight(150)
+        self.converted_display.setMinimumHeight(100)
         self.converted_display.setVisible(False)
         layout.addWidget(self.converted_display, 1)
 
-        # -- Button row --
         button_layout = QHBoxLayout()
 
         if self.needs_approval:
@@ -510,37 +455,36 @@ class TaskPopupWindow(QDialog):
 
         button_layout.addStretch()
 
-        # Copy output (only for assemble / line-metrics mode, but harmless for all)
-        self.copy_button = QPushButton("Copy Output")
+        self.copy_button = QPushButton(self._copy_button_label)
         self.copy_button.setObjectName("copyButton")
         self.copy_button.clicked.connect(self._on_copy_output)
         button_layout.addWidget(self.copy_button)
 
         self.stop_button = QPushButton("Stop")
         self.stop_button.setObjectName("stopButton")
-        self.stop_button.clicked.connect(self._on_stop)
+        # clicked(bool) must not bind to emit_stopped — use a zero-arg lambda.
+        self.stop_button.clicked.connect(lambda _checked=False: self._on_stop())
         self.stop_button.setEnabled(False)
         button_layout.addWidget(self.stop_button)
 
-        self.close_button = QPushButton("Close")
-        self.close_button.setObjectName("closeButton")
-        self.close_button.clicked.connect(self.close)
-        button_layout.addWidget(self.close_button)
+        if self._show_close_button:
+            self.close_button = QPushButton("Close")
+            self.close_button.setObjectName("closeButton")
+            button_layout.addWidget(self.close_button)
+        else:
+            self.close_button = None
 
         layout.addLayout(button_layout)
-    
-    def apply_styles(self):
-        """Apply window styles."""
+
+    def _apply_styles(self):
         self.setStyleSheet("""
-            QDialog {
-                background-color: #ffffff;
-            }
             QLabel#popupHeader {
                 color: #333333;
-                padding-bottom: 8px;
+                padding-bottom: 6px;
                 border-bottom: 2px solid #4CAF50;
             }
-            QTextBrowser#contextDisplay, QTextBrowser#logDisplay, QTextBrowser#responseDisplay, QTextBrowser#convertedDisplay {
+            QTextBrowser#contextDisplay, QTextBrowser#logDisplay,
+            QTextBrowser#responseDisplay, QTextBrowser#convertedDisplay {
                 background-color: #ffffff;
                 color: #333333;
                 border: 1px solid #d0d0d0;
@@ -550,103 +494,79 @@ class TaskPopupWindow(QDialog):
                 font-size: 11px;
                 selection-background-color: #b3d9ff;
             }
-            QTextBrowser#contextDisplay:focus, QTextBrowser#logDisplay:focus, QTextBrowser#responseDisplay:focus, QTextBrowser#convertedDisplay:focus {
-                border: 1px solid #1976d2;
-            }
             QPushButton#stopButton {
                 background-color: #ff6b6b;
                 color: white;
                 border: none;
                 border-radius: 4px;
-                padding: 8px 20px;
+                padding: 6px 14px;
                 font-weight: bold;
             }
-            QPushButton#stopButton:hover {
-                background-color: #ee5a5a;
-            }
-            QPushButton#stopButton:disabled {
-                background-color: #cccccc;
-            }
+            QPushButton#stopButton:hover { background-color: #ee5a5a; }
+            QPushButton#stopButton:disabled { background-color: #cccccc; }
             QPushButton#closeButton {
                 background-color: #666666;
                 color: white;
                 border: none;
                 border-radius: 4px;
-                padding: 8px 20px;
+                padding: 6px 14px;
                 font-weight: bold;
             }
-            QPushButton#closeButton:hover {
-                background-color: #555555;
-            }
+            QPushButton#closeButton:hover { background-color: #555555; }
             QPushButton#approveButton {
                 background-color: #4CAF50;
                 color: white;
                 border: none;
                 border-radius: 4px;
-                padding: 8px 20px;
+                padding: 6px 14px;
                 font-weight: bold;
             }
-            QPushButton#approveButton:hover {
-                background-color: #45a049;
-            }
+            QPushButton#approveButton:hover { background-color: #45a049; }
             QPushButton#copyButton {
                 background-color: #e0e0e0;
                 color: #333333;
                 border: 1px solid #c0c0c0;
                 border-radius: 4px;
-                padding: 8px 16px;
+                padding: 6px 12px;
                 font-weight: bold;
             }
-            QPushButton#copyButton:hover {
-                background-color: #d0d0d0;
-            }
-
-            /* Light scrollbar styling (match app's light theme) */
-            QDialog QScrollBar:vertical {
-                background-color: #f0f0f0;
-                width: 10px;
-                margin: 0px;
-            }
-            QDialog QScrollBar::handle:vertical {
-                background-color: #c0c0c0;
-                min-height: 20px;
-                border-radius: 5px;
-                margin: 2px;
-            }
-            QDialog QScrollBar::handle:vertical:hover {
-                background-color: #a0a0a0;
-            }
-            QDialog QScrollBar::add-line:vertical,
-            QDialog QScrollBar::sub-line:vertical {
-                height: 0px;
-                background: none;
-            }
-            QDialog QScrollBar::add-page:vertical,
-            QDialog QScrollBar::sub-page:vertical {
-                background: none;
-            }
+            QPushButton#copyButton:hover { background-color: #d0d0d0; }
         """)
-    
+
+    # -------------------------------------------------------------- public API
+
+    @property
+    def status(self) -> str:
+        return self._status
+
+    def get_response_text(self) -> str:
+        return self._response_text
+
+    def set_response_text(self, text: str):
+        """Replace visible + internal response text (e.g. after punctuation strip)."""
+        self._response_text = text or ""
+        if self._response_panel is not None:
+            self._response_panel.set_plain_text(self._response_text)
+        else:
+            self.response_display.setPlainText(self._response_text)
+        self._update_output_char_count()
+
+    def is_running(self) -> bool:
+        return bool(self._worker and self._worker.isRunning())
+
+    def is_waiting_approval(self) -> bool:
+        return self.needs_approval and not self._is_approved and self._pending_prompt is not None
+
     def set_context(self, context: str):
-        """Set the context text and update input char/token counters."""
         self.context_display.setPlainText(context)
         char_count = len(context)
         self.input_char_count_label.setText(f"Input: {char_count:,} chars")
         self.input_token_count_label.setText(f"~{char_count // 4:,} tokens")
-    
+
     def set_line_mapping(self, line_mapping: dict):
-        """
-        Set line number mapping for response conversion (merge overlaps task).
-        
-        Args:
-            line_mapping: Dict mapping offset -> {line_num -> (original_start, original_end, word)}
-                         This supports multiple regions with different offsets but same line numbers.
-        """
         self._line_mappings = line_mapping
-        # Conversion will be enabled when streaming starts
-    
+
     def log(self, message: str):
-        """Add a log message."""
         cursor = self.log_display.textCursor()
         cursor.movePosition(QTextCursor.End)
         cursor.insertText(message + "\n")
@@ -654,32 +574,59 @@ class TaskPopupWindow(QDialog):
         self.log_display.verticalScrollBar().setValue(
             self.log_display.verticalScrollBar().maximum()
         )
-    
+
     def set_chat_core(self, chat_core: ChatCore):
-        """Set the ChatCore instance to use."""
         self.chat_core = chat_core
-    
-    def execute_prompt(self, prompt: str, *, thinking_level: Optional[str] = None, task_key: Optional[str] = None):
-        """Execute the prompt using ChatCore."""
+
+    def set_quench_thresholds(self, max_line_length: float, max_over_limit_pct: float):
+        self._max_line_length = max_line_length
+        self._max_over_limit_pct = max_over_limit_pct
+
+    def clear_runtime_state(self):
+        """Reset displays for a retry without destroying the widget."""
+        self._stop_worker_quiet()
+        self._response_text = ""
+        self._conversion_buffer = ""
+        self._converted_text = ""
+        self._current_offset = 0
+        self.log_display.clear()
+        if self._response_panel is not None:
+            self._response_panel.set_plain_text("")
+        else:
+            self.response_display.clear()
+        self.converted_display.clear()
+        self.converted_label.setVisible(False)
+        self.converted_display.setVisible(False)
+        self._update_output_char_count()
+        self.stop_button.setEnabled(False)
+        self._status = "idle"
+
+    def execute_prompt(
+        self,
+        prompt: str,
+        *,
+        thinking_level: Optional[str] = None,
+        task_key: Optional[str] = None,
+        force: bool = False,
+    ):
         if not self.chat_core:
             self.log("Error: No ChatCore instance set")
             return
-        
-        # If needs approval and not yet approved, store prompt and wait
-        if self.needs_approval and not self._is_approved:
+
+        if self.needs_approval and not self._is_approved and not force:
             self._pending_prompt = prompt
             self._pending_thinking_level = thinking_level
             self._pending_task_key = task_key
+            self._status = "waiting"
             self.log("Waiting for approval to start...")
             return
-        
+
         model = self.chat_core.get_current_model()
         provider = self.chat_core.get_current_provider()
-        
         if not model or not provider:
             self.log("Error: No model selected")
             return
-        
+
         self._thinking_level = thinking_level
         self._task_key = task_key
 
@@ -688,41 +635,55 @@ class TaskPopupWindow(QDialog):
             self.log(f"Thinking: {thinking_level}")
         self.log(f"Prompt length: {len(prompt)} characters")
         self.log("-" * 40)
-        
+
         self.stop_button.setEnabled(True)
         self._response_text = ""
-        
-        # Start worker
-        self._worker = LLMWorker(self.chat_core, prompt, thinking_level=thinking_level, task_key=task_key)
+        if self._response_panel is not None:
+            self._response_panel.set_plain_text("")
+        else:
+            self.response_display.clear()
+        self._status = "running"
+
+        self._worker = LLMWorker(
+            self.chat_core, prompt, thinking_level=thinking_level, task_key=task_key
+        )
         self._worker.chunk_received.connect(self._on_chunk)
         self._worker.response_complete.connect(self._on_complete)
         self._worker.error_occurred.connect(self._on_error)
         self._worker.log_message.connect(self._on_worker_log)
         self._worker.start()
-    
+
+    def approve_and_start(self):
+        """Public approve used by Approve All."""
+        self._on_approve()
+
+    def request_stop(self):
+        self._on_stop()
+
+    # -------------------------------------------------------------- internals
+
+    def _stop_worker_quiet(self):
+        if self._worker and self._worker.isRunning():
+            self._worker.request_stop()
+            self._worker.wait(1000)
+        self._worker = None
+
     def _on_approve(self):
-        """Handle approval button click."""
         self._is_approved = True
         if self.approve_button:
             self.approve_button.setEnabled(False)
             self.approve_button.setText("✓ Approved")
-        
         self.gate_approved.emit()
-        
-        # Execute pending prompt if exists
         if self._pending_prompt:
-            self.execute_prompt(
-                self._pending_prompt,
-                thinking_level=self._pending_thinking_level,
-                task_key=self._pending_task_key
-            )
+            prompt = self._pending_prompt
+            thinking = self._pending_thinking_level
+            task_key = self._pending_task_key
             self._pending_prompt = None
-    
+            self.execute_prompt(prompt, thinking_level=thinking, task_key=task_key, force=True)
+
     def _on_chunk(self, chunk: str):
-        """Handle incoming chunk."""
         self.stream_activity.emit("chunk")
 
-        # Show converted output section on first chunk if line mapping is set
         if self._line_mappings and not self.converted_display.isVisible():
             self.converted_label.setVisible(True)
             self.converted_display.setVisible(True)
@@ -742,16 +703,21 @@ class TaskPopupWindow(QDialog):
 
         self._update_output_char_count()
 
-        # Auto-quench check (only when line metrics are active)
         if self.enable_line_metrics and "\n" in chunk:
             self._check_auto_quench()
 
-        # Convert and update converted output if line mapping is available
         if self._line_mappings:
             try:
-                from sentence_builder.response_converter import convert_response_incremental_multiregion
-                converted_chunk, self._conversion_buffer, self._current_offset = convert_response_incremental_multiregion(
-                    chunk, self._line_mappings, self._conversion_buffer, self._current_offset
+                from sentence_builder.response_converter import (
+                    convert_response_incremental_multiregion,
+                )
+                converted_chunk, self._conversion_buffer, self._current_offset = (
+                    convert_response_incremental_multiregion(
+                        chunk,
+                        self._line_mappings,
+                        self._conversion_buffer,
+                        self._current_offset,
+                    )
                 )
                 if converted_chunk:
                     self._converted_text += converted_chunk
@@ -766,29 +732,21 @@ class TaskPopupWindow(QDialog):
                 self.log(f"Warning: Conversion error: {e}")
 
     def _on_worker_log(self, message: str):
-        """Handle worker log messages."""
         self.log(message)
         self.stream_activity.emit("log")
-    
+
     def _update_output_char_count(self):
-        """Update the output character count label."""
-        char_count = len(self._response_text)
-        self.output_char_count_label.setText(f"Output: {char_count:,} chars")
+        self.output_char_count_label.setText(
+            f"Output: {len(self._response_text):,} chars"
+        )
 
     def _on_copy_output(self):
-        """Copy the response text to clipboard (without length gutter)."""
         text = self._response_text
         if text:
             QApplication.clipboard().setText(text)
             self.log("Output copied to clipboard.")
 
-    def set_quench_thresholds(self, max_line_length: float, max_over_limit_pct: float):
-        """Update auto-quench thresholds at runtime."""
-        self._max_line_length = max_line_length
-        self._max_over_limit_pct = max_over_limit_pct
-
     def _check_auto_quench(self):
-        """Stop streaming if too many lines exceed the length threshold."""
         if self._response_panel is None:
             return
         lengths = self._response_panel.get_line_lengths()
@@ -802,38 +760,154 @@ class TaskPopupWindow(QDialog):
                 f"AUTO-QUENCH: {over}/{total} lines ({pct:.1f}%) exceed "
                 f"max length {self._max_line_length}. Stopping."
             )
-            self._on_stop()
+            self._on_stop(emit_stopped=False)
+            self._status = "interrupted"
             self.auto_quenched.emit()
 
     def _on_complete(self, response: str):
-        """Handle completion."""
         self.stop_button.setEnabled(False)
-        self._update_output_char_count()  # Final update
+        if response:
+            self._response_text = response
+            if self._response_panel is not None:
+                # Keep streamed text; only sync if empty mismatch
+                if self._response_panel.get_plain_text() != response:
+                    self._response_panel.set_plain_text(response)
+            else:
+                self.response_display.setPlainText(response)
+        self._update_output_char_count()
         self.log("-" * 40)
         self.log("Task completed successfully!")
-        self.task_completed.emit(True, response)
-    
+        self._status = "success"
+        self.task_completed.emit(True, self._response_text)
+
     def _on_error(self, error: str):
-        """Handle error."""
         self.stop_button.setEnabled(False)
         self.log(f"Error: {error}")
-        if self._response_panel is not None:
-            self._response_panel.set_plain_text(f"Error: {error}")
-        else:
-            self.response_display.setPlainText(f"Error: {error}")
-        self.task_completed.emit(False, error)
-    
-    def _on_stop(self):
-        """Handle stop button."""
+        # Keep any partial output already streamed.
+        self._status = "error"
+        self.task_completed.emit(False, self._response_text or error)
+
+    def _on_stop(self, emit_stopped: bool = True):
+        """Stop the worker. Always mark interrupted when a worker existed.
+
+        Note: do not connect QPushButton.clicked directly to this method —
+        clicked(bool) would bind the checked flag onto *emit_stopped*.
+        """
         if self._worker:
+            was_running = self._worker.isRunning()
             self._worker.request_stop()
-            self._worker.wait(1000)
+            if was_running:
+                self._worker.wait(1000)
             self.stop_button.setEnabled(False)
             self.log("Task stopped by user")
-    
+            self._status = "interrupted"
+            if emit_stopped:
+                self.stopped.emit()
+        elif self._status == "running":
+            # UI thought it was running but worker is already gone.
+            self.stop_button.setEnabled(False)
+            self._status = "interrupted"
+            if emit_stopped:
+                self.stopped.emit()
+
+
+class TaskPopupWindow(QDialog):
+    """Compatibility wrapper: single-task popup around TaskExecutionPanel."""
+
+    task_completed = pyqtSignal(bool, str)
+    gate_approved = pyqtSignal()
+    stream_activity = pyqtSignal(str)
+    auto_quenched = pyqtSignal()
+
+    def __init__(
+        self,
+        task_name: str,
+        line_range: Optional[tuple] = None,
+        parent: Optional[QWidget] = None,
+        needs_approval: bool = False,
+        slice_info: Optional[str] = None,
+        enable_line_metrics: bool = False,
+        max_line_length: float = 50.0,
+        max_over_limit_pct: float = 12.5,
+    ):
+        super().__init__(parent)
+        self.task_name = task_name
+        self.line_range = line_range
+        self.needs_approval = needs_approval
+        self.slice_info = slice_info
+        self.enable_line_metrics = enable_line_metrics
+
+        title = f"Task: {task_name}"
+        if slice_info:
+            title += f" - {slice_info}"
+        self.setWindowTitle(title)
+        self.setMinimumSize(600, 500)
+        self.setModal(False)
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+
+        self.panel = TaskExecutionPanel(
+            task_name=task_name,
+            line_range=line_range,
+            needs_approval=needs_approval,
+            slice_info=slice_info,
+            enable_line_metrics=enable_line_metrics,
+            max_line_length=max_line_length,
+            max_over_limit_pct=max_over_limit_pct,
+            show_close_button=True,
+        )
+        layout.addWidget(self.panel)
+
+        # Forward panel signals
+        self.panel.task_completed.connect(self.task_completed.emit)
+        self.panel.gate_approved.connect(self.gate_approved.emit)
+        self.panel.stream_activity.connect(self.stream_activity.emit)
+        self.panel.auto_quenched.connect(self.auto_quenched.emit)
+
+        if self.panel.close_button is not None:
+            self.panel.close_button.clicked.connect(self.close)
+
+        # Compatibility attributes used by existing callers
+        self.chat_core = None
+        self.stop_button = self.panel.stop_button
+        self.approve_button = self.panel.approve_button
+        self.copy_button = self.panel.copy_button
+        self.close_button = self.panel.close_button
+        self.response_display = self.panel.response_display
+        self.log_display = self.panel.log_display
+        self.context_display = self.panel.context_display
+
+        self.setStyleSheet("QDialog { background-color: #ffffff; }")
+
+    def set_context(self, context: str):
+        self.panel.set_context(context)
+
+    def set_line_mapping(self, line_mapping: dict):
+        self.panel.set_line_mapping(line_mapping)
+
+    def log(self, message: str):
+        self.panel.log(message)
+
+    def set_chat_core(self, chat_core: ChatCore):
+        self.chat_core = chat_core
+        self.panel.set_chat_core(chat_core)
+
+    def execute_prompt(
+        self,
+        prompt: str,
+        *,
+        thinking_level: Optional[str] = None,
+        task_key: Optional[str] = None,
+    ):
+        self.panel.execute_prompt(
+            prompt, thinking_level=thinking_level, task_key=task_key
+        )
+
+    def set_quench_thresholds(self, max_line_length: float, max_over_limit_pct: float):
+        self.panel.set_quench_thresholds(max_line_length, max_over_limit_pct)
+
     def closeEvent(self, event):
-        """Handle window close."""
-        if self._worker and self._worker.isRunning():
-            self._worker.request_stop()
-            self._worker.wait(1000)
+        if self.panel.is_running():
+            self.panel.request_stop()
         super().closeEvent(event)

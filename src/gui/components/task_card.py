@@ -20,13 +20,7 @@ from pathlib import Path
 from typing import Optional, Callable
 import re
 
-try:
-    # Optional (used for reading task defaults from config.yaml)
-    from chatbot_core.thinking_resolver import load_root_config, get_task_default_thinking_level, SUPPORTED_NORMALIZED_LEVELS
-except Exception:
-    load_root_config = None
-    get_task_default_thinking_level = None
-    SUPPORTED_NORMALIZED_LEVELS = ("auto", "no", "low", "mid", "high")
+from .thinking_level_selector import ThinkingLevelSelector
 
 
 class TaskCard(QFrame):
@@ -138,38 +132,17 @@ class TaskCard(QFrame):
         layout.addWidget(self.user_input)
 
         # Thinking level selector (per-task)
-        thinking_container = QWidget()
-        thinking_layout = QHBoxLayout(thinking_container)
-        thinking_layout.setContentsMargins(0, 0, 0, 0)
-        thinking_layout.setSpacing(6)
+        thinking_row = QWidget()
+        thinking_row_layout = QHBoxLayout(thinking_row)
+        thinking_row_layout.setContentsMargins(0, 0, 0, 0)
+        thinking_row_layout.setSpacing(6)
 
-        thinking_label = QLabel("Thinking:")
-        thinking_label.setStyleSheet("color: #666666; font-size: 13px;")
-        thinking_layout.addWidget(thinking_label)
-
-        self.thinking_combo = QComboBox()
-        self.thinking_combo.setObjectName("thinkingLevelCombo")
-        self.thinking_combo.setStyleSheet("""
-            QComboBox#thinkingLevelCombo {
-                background-color: #ffffff;
-                border: 1px solid #d0d0d0;
-                border-radius: 4px;
-                padding: 2px 8px;
-                min-width: 90px;
-                font-size: 13px;
-            }
-            QComboBox#thinkingLevelCombo:hover {
-                border-color: #b0b0b0;
-            }
-        """)
-
-        # Populate defaults
-        self.set_supported_thinking_levels(list(SUPPORTED_NORMALIZED_LEVELS))
-        self._apply_default_thinking_level()
-
-        thinking_layout.addWidget(self.thinking_combo)
-        thinking_layout.addStretch()
-        layout.addWidget(thinking_container)
+        self.thinking_selector = ThinkingLevelSelector(task_key=self.task_key, show_label=True)
+        # Keep attribute alias used by set_enabled / older callers
+        self.thinking_combo = self.thinking_selector.combo
+        thinking_row_layout.addWidget(self.thinking_selector)
+        thinking_row_layout.addStretch()
+        layout.addWidget(thinking_row)
         
         # Task-specific controls container (for subclasses)
         self.controls_container = QWidget()
@@ -308,43 +281,10 @@ class TaskCard(QFrame):
         if hasattr(self, "thinking_combo"):
             self.thinking_combo.setEnabled(enabled)
 
-    def _apply_default_thinking_level(self):
-        """
-        Initialize thinking selector from config.yaml task default when available.
-        """
-        if load_root_config and get_task_default_thinking_level:
-            try:
-                root = load_root_config()
-                default_level = get_task_default_thinking_level(root, self.task_key)
-                if default_level:
-                    # If a scheme only supports a binary thinking toggle (no/yes),
-                    # map low/mid/high defaults to "yes".
-                    if self._combo_has_value(default_level):
-                        self.thinking_combo.setCurrentText(default_level)
-                        return
-                    if default_level in ("low", "mid", "high") and self._combo_has_value("yes"):
-                        self.thinking_combo.setCurrentText("yes")
-                        return
-            except Exception:
-                pass
-
-        # Fallback: assemble-sentence defaults to low, others to auto
-        fallback = "low" if self.task_key == "assemble-sentence" else "auto"
-        if self._combo_has_value(fallback):
-            self.thinking_combo.setCurrentText(fallback)
-        elif fallback in ("low", "mid", "high") and self._combo_has_value("yes"):
-            self.thinking_combo.setCurrentText("yes")
-
-    def _combo_has_value(self, value: str) -> bool:
-        for i in range(self.thinking_combo.count()):
-            if self.thinking_combo.itemText(i) == value:
-                return True
-        return False
-
     def get_thinking_level(self) -> str:
         """Get currently selected thinking level (normalized)."""
-        if hasattr(self, "thinking_combo"):
-            return self.thinking_combo.currentText().strip() or "auto"
+        if hasattr(self, "thinking_selector"):
+            return self.thinking_selector.get_thinking_level()
         return "auto"
 
     def set_supported_thinking_levels(self, levels: list):
@@ -355,25 +295,8 @@ class TaskCard(QFrame):
         - If a level (e.g. 'no') is not supported, we hide it (remove from list).
         - Try to keep the current selection when possible.
         """
-        if not hasattr(self, "thinking_combo"):
-            return
-
-        current = self.get_thinking_level()
-
-        self.thinking_combo.blockSignals(True)
-        try:
-            self.thinking_combo.clear()
-            for level in levels:
-                self.thinking_combo.addItem(level)
-            # preserve selection
-            if current and self._combo_has_value(current):
-                self.thinking_combo.setCurrentText(current)
-            elif current in ("low", "mid", "high") and self._combo_has_value("yes"):
-                self.thinking_combo.setCurrentText("yes")
-            else:
-                self._apply_default_thinking_level()
-        finally:
-            self.thinking_combo.blockSignals(False)
+        if hasattr(self, "thinking_selector"):
+            self.thinking_selector.set_supported_levels(levels)
 
 
 class MergeOverlapsCard(TaskCard):
@@ -1222,19 +1145,28 @@ class AssembleCard(TaskCard):
             self.row_action_requested.emit(line_range, "retry")
 
     def bind_result_popup(self, line_range: tuple, popup: QWidget):
+        """Bind magnifier to a popup or task-group window.
+
+        If *popup* exposes ``focus_line_range(line_range)``, the magnifier
+        restores the group and scrolls to that subtask card.
+        """
         key = self._line_range_key(line_range[0], line_range[1])
         row = self._result_rows.get(key)
         if not row:
             return
         row["popup_ref"] = popup
+        target_range = line_range
 
         def _focus_popup():
             ref = row.get("popup_ref")
             if not ref:
                 return
-            ref.show()
-            ref.raise_()
-            ref.activateWindow()
+            if hasattr(ref, "focus_line_range"):
+                ref.focus_line_range(target_range)
+            else:
+                ref.show()
+                ref.raise_()
+                ref.activateWindow()
 
         try:
             row["popup_button"].clicked.disconnect()
